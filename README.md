@@ -31,7 +31,7 @@ Save the following as `~/.pi/agent/hiraishi/config.json` with your endpoint and 
   "endpoint": "https://classifier.example.invalid/v1/systemone",
   "model": "your-classifier-model",
   "apiKeyEnv": "HIRAISHI_API_KEY",
-  "minAllowConfidence": 0.8,
+  "minAllowConfidence": 0.7,
   "timeoutMs": 5000
 }
 ```
@@ -41,6 +41,8 @@ Replace the example URL and model. Make your API key available in the named envi
 The configuration and the allowlist accept `//` and `/* */` comments, so optional keys can stay in the file as a commented line. See `config.sample.json`.
 
 The interface language is English or Japanese. Add `"locale": "ja"` or `"locale": "en"` to the configuration; without it the locale follows `LC_ALL`, `LC_MESSAGES` or `LANG`. The language never changes what is decided, only how the confirmation is written.
+
+The default `minAllowConfidence` is `0.7`. An explicit value in your personal config takes precedence; change an existing `0.8` to `0.7` to use the new threshold.
 
 Restart pi or run `/reload`, then send your next instruction. Personal settings are separate from the installed package. `HIRAISHI_CONFIG` can point to another config file; a custom pi agent directory also changes the default settings location.
 
@@ -83,13 +85,13 @@ Keep these personal files private. The repository contains only sample settings.
 
 All operations sent to the classifier are checked against the requested goal and scope:
 
-- Ordinary reads, searches and listings reasonably related to the task are allowed. Clearly unrelated reading requires confirmation, even inside the project. A related dependency outside the working directory is not automatically out of scope.
+- Verified built-in `read`, `grep`, `find` and `ls` operations allow broad investigation by default unless the target may contain sensitive information, the user has prohibited the read, or it is clearly unrelated to the task. An uncertain connection alone does not require confirmation, and individual files need not be named in the request. Other reads, searches and listings must be reasonably related to the task. A related dependency outside the working directory is not automatically out of scope.
 - Local writes require stricter relevance: the change must be explicitly requested or necessary, and its targets, scope and impact must be proportionate. An unrelated edit requires confirmation even if small or reversible. Routine supporting edits and tests do not need a separate instruction naming each file.
 - External writes require explicit user authorization for the destination and action. A request to fix code does not by itself authorize pushing or posting it.
 
 Ordinary built-in reads also go through classification so that relevance and personal preferences can be evaluated. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
 
-The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence`; policy guidance does not guarantee a particular model decision.
+The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence` (default `0.7` for all operations); policy guidance does not guarantee a particular model decision.
 
 ## What to expect
 

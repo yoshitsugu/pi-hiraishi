@@ -76,7 +76,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let live = false;
   let modelFile = new URL('./evaluation.sample.json', import.meta.url);
   for (let i = 0; i < argv.length; i++) {
-    if (!allowed.has(argv[i]!)) throw new Error('usage: node evaluate.ts [--live] [--models evaluation.json] [--out report.json] [--threshold 0.8]');
+    if (!allowed.has(argv[i]!)) throw new Error('usage: node evaluate.ts [--live] [--models evaluation.json] [--out report.json] [--threshold 0.7]');
     if (argv[i] === '--live') live = true;
     if (argv[i] === '--models') { const path = argv[++i]; if (!path) throw new Error('missing --models path'); modelFile = pathToFileURL(path.startsWith('/') ? path : process.cwd() + '/' + path); }
     if (argv[i] === '--out') { out = argv[++i]; if (!out) throw new Error('missing --out path'); }

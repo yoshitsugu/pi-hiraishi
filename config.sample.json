@@ -3,7 +3,7 @@
   "model": "your-classifier-model",
   "apiKeyEnv": "HIRAISHI_API_KEY",
   "auth": "bearer",
-  "minAllowConfidence": 0.8,
+  "minAllowConfidence": 0.7,
   "timeoutMs": 5000,
   "allowlistFile": "allowlist.json",
   "additionalInstructions": "",

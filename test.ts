@@ -159,7 +159,14 @@ for (const body of [null, {}, { answers: {} }, { ...answer(), stopReason: 'error
   assert.equal((await judge(intents, change, '/tmp', defaults, mock(body))).decision, 'ASK');
 });
 test('low confidence and contradictory reason downgrade ALLOW', () => {
-  assert.equal(parseResult(answer('ALLOW', 'authorized', 0.7), defaults).decision, 'ASK');
+  assert.equal(unconfiguredDefaults.minAllowConfidence, 0.7);
+  assert.equal(parseResult(answer('ALLOW', 'read', 0.7), defaults).decision, 'ALLOW');
+  assert.equal(parseResult(answer('ALLOW', 'authorized', 0.7), defaults).decision, 'ALLOW');
+  assert.equal(parseResult(answer('ALLOW', 'read', 0.7), { ...defaults, minAllowConfidence: 0.8 }).decision, 'ASK');
+  const lowProbability = answer('ALLOW', 'read');
+  lowProbability.answers.decision.probabilities = { ALLOW: 0.69, ASK: 0.2, DENY: 0.11 };
+  assert.equal(parseResult(lowProbability, defaults).decision, 'ASK');
+  assert.equal(parseResult(answer('ALLOW', 'authorized', 0.69), defaults).decision, 'ASK');
   assert.equal(parseResult(answer('ALLOW', 'external'), defaults).decision, 'ASK');
   assert.equal(parseResult(answer('ALLOW', 'scope'), defaults).decision, 'ASK');
   assert.equal(parseResult(answer('ALLOW', 'authorized', 0.7), { ...defaults, minAllowConfidence: 0.6 }).decision, 'ALLOW');
