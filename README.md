@@ -44,6 +44,20 @@ The interface language is English or Japanese. Add `"locale": "ja"` or `"locale"
 
 Restart pi or run `/reload`, then send your next instruction. Personal settings are separate from the installed package. `HIRAISHI_CONFIG` can point to another config file; a custom pi agent directory also changes the default settings location.
 
+## Personal decision preferences
+
+Add `additionalInstructions` to your personal `config.json` to refine the classifier's scope and confirmation preferences:
+
+```json
+{
+  "additionalInstructions": "Ask before changing deployment settings or adding dependencies. Treat the sibling shared-library directory as relevant when investigating build failures."
+}
+```
+
+Merge this field into your endpoint and model settings. It accepts up to 8000 characters and can be written in the language understood by your classifier. Empty or omitted text uses the default policy. The text is appended to both classification questions as trusted configuration, separately from the current and prior user instructions. It is sent to the configured classifier, so do not include credentials or private data. If sensitive text is detected, classification is skipped and local confirmation is required.
+
+Preferences do not authorize a particular operation or remove the requirement for explicit authorization of external writes. They do not override local sensitive-data checks, script review, the allowlist, or the confidence threshold. An explicitly allowlisted command runs through the local approval path without the classifier or these extra instructions.
+
 ## Allowlist
 
 Optionally save commands you trust in `~/.pi/agent/hiraishi/allowlist.json`:
@@ -62,16 +76,24 @@ Keep these personal files private. The repository contains only sample settings.
 
 | Layer | Role |
 |---|---|
-| Local inspection | Reads facts from the operation itself: credential material, a target outside the project, a network destination, a deletion, a script. No instruction wording is inspected. |
-| Classifier | Reads the instruction text and decides authorization, including negation, quotation, revocation and scope. |
+| Local inspection | Detects credential material, network destinations, deletion, scripts and explicitly allowlisted commands. It does not infer user intent from keywords. |
+| Classifier | Receives the current and prior trusted user instructions, working directory and operation details. Checks relevance, authorization, negation, quotation and revocation under the default policy and personal preferences. |
 | Policy | Turns the facts and the classifier answer into ALLOW, ASK or DENY. |
 | Confirmation | Shows the stored operation and asks the human to approve it. |
 
-Because the local layer never reads your words, a denial or a confirmation never depends on the language of the instruction, and a later instruction that revokes an earlier one is handled by the classifier instead of by a keyword. Operations that touch credential material are confirmed locally and are never sent to the classifier, so no secret and no instruction text leaves the machine for them.
+All operations sent to the classifier are checked against the requested goal and scope:
+
+- Ordinary reads, searches and listings reasonably related to the task are allowed. Clearly unrelated reading requires confirmation, even inside the project. A related dependency outside the working directory is not automatically out of scope.
+- Local writes require stricter relevance: the change must be explicitly requested or necessary, and its targets, scope and impact must be proportionate. An unrelated edit requires confirmation even if small or reversible. Routine supporting edits and tests do not need a separate instruction naming each file.
+- External writes require explicit user authorization for the destination and action. A request to fix code does not by itself authorize pushing or posting it.
+
+Ordinary built-in reads also go through classification so that relevance and personal preferences can be evaluated. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
+
+The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence`; policy guidance does not guarantee a particular model decision.
 
 ## What to expect
 
-- **ALLOW:** proceed with authorized work, routine reads, and low-risk local changes.
+- **ALLOW:** proceed with relevant reads, necessary proportionate local work, and explicitly authorized operations within scope.
 - **ASK:** explain the proposed operation and request your approval before proceeding. Credential material that would leave the machine always lands here.
 - **DENY:** block operations the classifier reports as clearly improper, such as privilege abuse.
 

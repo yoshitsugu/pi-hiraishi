@@ -1,6 +1,6 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { defaults, questions, prepare, judge, parseJsonc, validateConfig, type Config, type Decision, type Services } from './hiraishi.ts';
+import { defaults, questions, classificationQuestions, prepare, judge, parseJsonc, validateConfig, type Config, type Decision, type Services } from './hiraishi.ts';
 import { cases } from './cases.ts';
 export interface Row {
   name: string; expected: Decision; actual: Decision; route: 'local' | 'model';
@@ -48,7 +48,7 @@ export async function evaluate(live: boolean, services: Services = {}, threshold
       rows.push({ name: c.name, expected: c.expected, actual: verdict.decision, route, latencyMs: performance.now() - start, failed: verdict.failed === true, usage: verdict.usage });
       if (verdict.failed) { status = 'incomplete'; note = 'Stopped after the first classifier failure; no retries or provider fallback. Check credentials, access, response schema or timeout.'; break; }
     }
-    results.push({ endpoint: config.endpoint, model: config.model, status, note, metrics: metrics(rows), modelOnlyMetrics: metrics(rows.filter(r => r.route === 'model')), rows });
+    results.push({ endpoint: config.endpoint, model: config.model, questions: classificationQuestions(config), status, note, metrics: metrics(rows), modelOnlyMetrics: metrics(rows.filter(r => r.route === 'model')), rows });
   }
   const complete = results.filter(r => r.status === 'complete');
   const ranked = complete.toSorted((a, b) => {

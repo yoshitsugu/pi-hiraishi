@@ -12,7 +12,7 @@ Clients that use RPC must also be authenticated.
 
 ## Data sent to the external model
 
-The request sends the required user instructions, the operation, its targets, hints about side effects and the fact that recoverability is unverified.
+The request sends the required user instructions, the working directory, the operation, its targets, hints about side effects and the fact that recoverability is unverified. Configured `additionalInstructions` are sent as trusted policy preferences in both classification questions.
 File bodies and existing file contents are never part of the decision input.
 Operations that touch credential material are confirmed locally instead, so neither the instruction nor the operation reaches the classifier for them.
 Possible sensitive data is handled by a local confirmation instead.
@@ -21,8 +21,10 @@ For sensitive work, review the outgoing request before it is sent.
 No telemetry is added.
 Instructions inside the model input are separated and the response is validated, but prompt injection and model errors remain possible.
 An explanation written by the execution model can also be wrong.
+Additional instructions are model guidance, not a deterministic policy engine. They do not authorize individual operations or override local sensitive-data checks, script review or the confidence threshold. Explicitly allowlisted commands bypass classification and personal prompt preferences.
+Ordinary built-in reads are classified against user intent; an unavailable classifier or missing trusted instructions requires confirmation.
 
-The local layer never inspects the wording of an instruction. A confirmation or a denial caused by a local fact is therefore the same in every language, and a revoked instruction is resolved by the classifier, not by a keyword. The classifier compares the same meaning across languages only as well as the model itself allows, so its DENY answer can still be wrong in one language and right in another.
+The local layer does not infer authorization from instruction keywords. Revocation and the relationship between the requested goal and an operation are evaluated by the classifier. The classifier compares the same meaning across languages only as well as the model itself allows, so its DENY answer can still be wrong in one language and right in another.
 
 ## Approval and state checks
 

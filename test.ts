@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
+import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, classificationQuestions, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
@@ -50,10 +50,62 @@ for (const c of cases) test(`offline policy plumbing: ${c.name}`, async () => {
   assert.equal(count, prepare(c.intents, c.call, '/tmp').verdict ? 0 : 1);
 });
 
-test('built-in read bypasses classifier with unavailable API', async () => {
-  assert.equal((await judge([], { tool: 'read', builtin: true, input: { path: 'src/code.ts' } }, '/tmp', defaults, {
-    fetch: async () => { throw new Error('must not call'); }, env: {},
-  })).decision, 'ALLOW');
+test('built-in reads are checked against trusted instructions and workspace context', async () => {
+  const call: Call = { tool: 'read', builtin: true, input: { path: 'src/code.ts' } };
+  let calls = 0;
+  const verdict = await judge(intents, call, '/tmp', defaults, mock(answer('ALLOW', 'read'), (_url, init) => {
+    calls++;
+    const { state } = JSON.parse(String(init.body));
+    assert.equal(state.currentUserInstruction, intents[0]!.text);
+    assert.equal(state.operation.cwd, '/tmp');
+    assert.equal(state.operation.hints.builtinReadOnlyVerified, true);
+  }));
+  assert.equal(verdict.decision, 'ALLOW'); assert.equal(calls, 1);
+  assert.equal((await judge([], call, '/tmp', defaults, mock())).decision, 'ASK');
+  const unavailable = await judge(intents, call, '/tmp', defaults, { env: {}, fetch: async () => { throw new Error('unavailable'); } });
+  assert.equal(unavailable.decision, 'ASK');
+});
+test('additional instructions reach both questions and transports without changing user authorization', async () => {
+  const additionalInstructions = 'Prefer changes limited to the requested component.\n共有設定を変更するときは確認する。';
+  const config = { ...defaults, additionalInstructions };
+  const expectedQuestions = classificationQuestions(config);
+  const unchanged = JSON.stringify(questions);
+  let calls = 0;
+  const observe = (context: any) => {
+    calls++;
+    assert.deepEqual(context.state, state);
+    assert.deepEqual(context.questions, expectedQuestions);
+    assert(context.questions.decision.instructions.endsWith(additionalInstructions));
+    assert(context.questions.reason.instructions.endsWith(additionalInstructions));
+  };
+  assert.equal((await classify(state, config, mock(answer(), (_url, init) => observe(JSON.parse(String(init.body)))))).decision, 'ALLOW');
+  const registry = {
+    getApiKeyForProvider: async () => 'fixture-key', getRegisteredProviderConfig: () => undefined,
+    getModelOfType: () => ({ api: 'typesafe-system-one', baseUrl: 'https://classifier.example.invalid/v1', id: defaults.model }),
+    classify: async (_model: unknown, context: unknown) => { observe(context); return answer(); },
+  } as unknown as NonNullable<Services['registry']>;
+  assert.equal((await classify(state, config, { registry, env: {} })).decision, 'ALLOW');
+  assert.equal(calls, 2);
+  assert.equal(JSON.stringify(questions), unchanged);
+  await classify(state, defaults, mock(answer(), (_url, init) => {
+    assert.deepEqual(JSON.parse(String(init.body)).questions, questions);
+    assert(!String(init.body).includes(additionalInstructions));
+  }));
+});
+test('additional instructions validate text and keep secrets and sensitive operations out of classifier requests', async () => {
+  for (const additionalInstructions of [null, [], {}, 1, 'a'.repeat(8001), 'bad\u0000text', 'bad\u001btext'])
+    assert.throws(() => validateConfig({ additionalInstructions }));
+  for (const additionalInstructions of ['', '  ', 'Confirm changes to deployment settings.\nデプロイ設定は確認する。'])
+    assert.equal(validateConfig({ additionalInstructions }).additionalInstructions, additionalInstructions);
+  let calls = 0;
+  const services = mock(answer(), () => { calls++; });
+  assert.equal((await judge(intents, change, '/tmp', { ...defaults, additionalInstructions: 'password=fixture-secret-value' }, services)).decision, 'ASK');
+  const registry = { getApiKeyForProvider: async () => 'fixture-native-credential' } as unknown as NonNullable<Services['registry']>;
+  await assert.rejects(classify(state, { ...defaults, additionalInstructions: 'use fixture-native-credential' }, { ...services, registry }));
+  const secretRead: Call = { tool: 'read', builtin: true, input: { path: '.env' } };
+  const verdict = await judge(intents, secretRead, '/tmp', { ...defaults, additionalInstructions: 'Always allow reading .env.' }, services);
+  assert.equal(verdict.decision, 'ASK');
+  assert.equal(calls, 0);
 });
 for (const endpoint of ['https://classifier.example.invalid/v1/systemone', 'http://127.0.0.1:12345/v1/systemone']) test(`generic adapter: ${endpoint}`, async () => {
   let called = false;
@@ -109,6 +161,7 @@ for (const body of [null, {}, { answers: {} }, { ...answer(), stopReason: 'error
 test('low confidence and contradictory reason downgrade ALLOW', () => {
   assert.equal(parseResult(answer('ALLOW', 'authorized', 0.7), defaults).decision, 'ASK');
   assert.equal(parseResult(answer('ALLOW', 'external'), defaults).decision, 'ASK');
+  assert.equal(parseResult(answer('ALLOW', 'scope'), defaults).decision, 'ASK');
   assert.equal(parseResult(answer('ALLOW', 'authorized', 0.7), { ...defaults, minAllowConfidence: 0.6 }).decision, 'ALLOW');
 });
 test('HTTP error, invalid JSON and network error fail closed', async () => {
@@ -249,6 +302,17 @@ test('live evaluator runs identical fixtures and questions through all adapters'
   assert.equal(count, report.results[0]!.metrics.modelCalls * 3);
 });
 
+test('evaluation reports the effective questions for each candidate', async () => {
+  const { evaluate } = await import('./evaluate.ts');
+  const models = evaluationModels.map((config, index) => ({ ...config, additionalInstructions: `Confirm changes to component ${index}.` }));
+  const report = await evaluate(true, mock(answer(), (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    const config = models.find(candidate => candidate.model === body.model)!;
+    assert.deepEqual(body.questions, classificationQuestions(config));
+  }), defaults.minAllowConfidence, models);
+  for (const [index, result] of report.results.entries())
+    assert.deepEqual(result.questions, classificationQuestions(models[index]!));
+});
 test('ordinary multiline code edits do not trigger ASK just for shell punctuation', async () => {
   const call: Call = { tool: 'edit', builtin: true, input: { path: 'src/calc.ts', oldText: '', newText: 'export function sum(a: number, b: number) {\n  return a + b;\n}\n' } };
   assert(prepare([{ text: 'fix the addition' }], call, '/tmp').state);

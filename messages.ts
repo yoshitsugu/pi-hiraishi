@@ -3,7 +3,6 @@ export type Locale = 'en' | 'ja';
 export interface Messages {
   verdicts: {
     askDefaultRisk: string;
-    allowLocalRead: string;
     riskLocalRead: string;
     allowAllowlist: string;
     riskAllowlist: string;
@@ -123,7 +122,6 @@ export interface Messages {
 const en: Messages = {
   verdicts: {
     askDefaultRisk: 'It is not yet confirmed what changes and whether it can be undone',
-    allowLocalRead: 'ordinary local read',
     riskLocalRead: 'reads local information',
     allowAllowlist: 'matches the allowlist of approved commands',
     riskAllowlist: 'runs a command approved in the settings',
@@ -149,6 +147,7 @@ const en: Messages = {
     external: 'external service change without explicit instruction',
     destructive: 'hard-to-reverse change with no clear necessity',
     sensitive: 'check of sensitive data or authority scope',
+    scope: 'the operation is unrelated to the requested goal or exceeds its scope',
     uncertain: 'the scope of the operation cannot be determined',
     improper: 'credential export outside its purpose or clear privilege abuse',
   },
@@ -266,7 +265,6 @@ const en: Messages = {
 const ja: Messages = {
   verdicts: {
     askDefaultRisk: '何が変わるか、元に戻せるかはまだ確認できません',
-    allowLocalRead: '通常のローカル読み取り',
     riskLocalRead: 'ローカル情報の読み取り',
     allowAllowlist: '許可リストのコマンドに一致',
     riskAllowlist: '設定で承認したコマンドの実行',
@@ -292,6 +290,7 @@ const ja: Messages = {
     external: '明示的指示のない外部サービスの変更',
     destructive: '必要性が明確でなく元に戻しにくい変更',
     sensitive: '機密情報・権限の利用範囲の確認',
+    scope: '依頼の目的と無関係、または依頼の範囲を超える操作',
     uncertain: '操作の影響範囲を確定できません',
     improper: '認証情報の目的外送信または明確な権限逸脱',
   },
