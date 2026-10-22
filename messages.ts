@@ -12,7 +12,6 @@ export interface Messages {
     riskCredentialEgress: string;
     askNoIntents: string;
     askTooLarge: string;
-    askEditBody: string;
     askScriptSideEffects: string;
     judgeInvalidConfig: string;
     judgeUnavailable: string;
@@ -131,8 +130,7 @@ const en: Messages = {
     riskCredentialEgress: 'check the destination and the credential file against your request',
     askNoIntents: 'the trusted user instructions could not be read safely',
     askTooLarge: 'the operation is too large to evaluate without dropping information',
-    askEditBody: 'the edited body mentions execution, network or deletion; confirmed locally without sending the body',
-    askScriptSideEffects: 'the script and the side effects of the code it loads need confirmation',
+    askScriptSideEffects: 'the script has possible writes, deletion, network or nested execution, or could not be inspected safely',
     judgeInvalidConfig: 'the allowlist or classifier settings are invalid',
     judgeUnavailable: 'the classifier service is unavailable, so confirmation is required',
     insufficient: 'ALLOW confidence is below the configured threshold',
@@ -142,13 +140,13 @@ const en: Messages = {
   },
   reasons: {
     authorized: 'the operation matches an explicit user instruction',
-    necessary: 'local work needed for the goal',
-    read: 'purpose-aligned read, search or test',
+    necessary: 'ordinary local editing, building or testing',
+    read: 'ordinary read, search or listing',
     external: 'external service change without explicit instruction',
-    destructive: 'hard-to-reverse change with no clear necessity',
+    destructive: 'consequential change without sufficient authorization',
     sensitive: 'check of sensitive data or authority scope',
-    scope: 'the operation is unrelated to the requested goal or exceeds its scope',
-    uncertain: 'the scope of the operation cannot be determined',
+    scope: 'an explicit restriction excludes the operation, or unrelated private data is accessed',
+    uncertain: 'consequential effects cannot be determined safely',
     improper: 'credential export outside its purpose or clear privilege abuse',
   },
   riskLabels: { read: 'read', write: 'write', delete: 'delete', network: 'network', execute: 'program execution', load: 'loaded code' },
@@ -274,8 +272,7 @@ const ja: Messages = {
     riskCredentialEgress: '送信先と認証情報ファイルが依頼どおりか確認してください',
     askNoIntents: '信頼できるユーザー指示を解析できません',
     askTooLarge: '操作が大きすぎ、情報を落とさずに評価できません',
-    askEditBody: '編集内容に実行・通信・削除の記述があるため、本文を送らず確認します',
-    askScriptSideEffects: 'スクリプトと読み込むコードの副作用を確認する必要があります',
+    askScriptSideEffects: 'スクリプトに書き込み・削除・通信・別の処理の実行の可能性があるか、安全に内容を調べられないため確認します',
     judgeInvalidConfig: '許可リストまたは判定設定が不正です',
     judgeUnavailable: '判定サービスを利用できないため確認が必要です',
     insufficient: 'ALLOWの確信度が設定した閾値未満です',
@@ -285,13 +282,13 @@ const ja: Messages = {
   },
   reasons: {
     authorized: 'ユーザーの明示的指示に沿った操作',
-    necessary: '目的に必要なローカル作業',
-    read: '目的に沿った読み取り・検索・テスト',
+    necessary: '通常のローカル編集・ビルド・テスト',
+    read: '通常の読み取り・検索・一覧表示',
     external: '明示的指示のない外部サービスの変更',
-    destructive: '必要性が明確でなく元に戻しにくい変更',
+    destructive: '十分な許可がない重大な変更',
     sensitive: '機密情報・権限の利用範囲の確認',
-    scope: '依頼の目的と無関係、または依頼の範囲を超える操作',
-    uncertain: '操作の影響範囲を確定できません',
+    scope: '明示的な制限に反する操作、または無関係な私的データへのアクセス',
+    uncertain: '重大な副作用の影響範囲を確定できません',
     improper: '認証情報の目的外送信または明確な権限逸脱',
   },
   riskLabels: { read: '読み取り', write: '書き込み', delete: '削除', network: '外部通信', execute: 'プログラムの実行', load: '読み込まれるコード' },

@@ -325,7 +325,7 @@ test('ordinary multiline code edits do not trigger ASK just for shell punctuatio
   assert(prepare([{ text: 'fix the addition' }], call, '/tmp').state);
   assert.equal((await judge([{ text: 'fix the addition' }], call, '/tmp', defaults, mock())).decision, 'ALLOW');
   const dangerous = { ...call, input: { ...call.input, newText: 'require("node:fs").rmSync("/home/user/Documents", { recursive: true });' } };
-  assert.equal(prepare(intents, dangerous, '/tmp').verdict?.decision, 'ASK');
+  assert(prepare(intents, dangerous, '/tmp').state);
 });
 test('pi official loader loads the single-file extension without errors', async () => {
   const { discoverAndLoadExtensions } = await import('@earendil-works/pi-coding-agent');
@@ -1307,4 +1307,79 @@ test('personal configuration follows the pi agent directory independently of pac
     if (savedAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgent;
     rmSync(dir, { recursive: true });
   }
+});
+
+test('saving execution, deletion and network source is judged as a save without transmitting the body', async () => {
+  for (const content of [
+    'execSync("npm test");',
+    'rmSync("build", { recursive: true });',
+    'fetch("https://example.invalid/api", { method: "POST" });',
+  ]) {
+    const call: Call = { tool: 'write', builtin: true, input: { path: 'src/task.ts', content } };
+    let requests = 0;
+    const verdict = await judge(intents, call, '/tmp', defaults, mock(answer('ALLOW', 'necessary'), (_url, init) => {
+      requests++;
+      const { state } = JSON.parse(String(init.body));
+      assert.deepEqual(state.operation.possibleSideEffects, ['local file modification; saves source without executing it; file bodies withheld']);
+      assert.equal(state.operation.input.contentOmitted, true);
+      assert(!JSON.stringify(state).includes(content));
+    }));
+    assert.equal(verdict.decision, 'ALLOW'); assert.equal(requests, 1);
+  }
+});
+
+test('scripts with concrete effects or unavailable source still require local confirmation', async () => {
+  const f = scriptFixture();
+  let requests = 0;
+  try {
+    for (const source of ['File.write("out.txt", "hello")', 'File.unlink("old.txt")',
+      'Net::HTTP.get(URI("https://example.invalid"))', 'system("rm -rf old")',
+      'rm -rf old', 'git reset --hard', 'git push origin main', 'sudo chmod 777 /etc/example', 'api_key = "fixture-private-value"']) {
+      writeFileSync(f.script, source);
+      assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer(), () => { requests++; }))).decision, 'ASK', source);
+    }
+    rmSync(f.script);
+    assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer(), () => { requests++; }))).decision, 'ASK');
+    assert.equal(requests, 0);
+  } finally { f.clean(); }
+});
+
+test('routine scripts use classification without automatic confirmation and preserve refusals and state checks', async () => {
+  const f = scriptFixture('require "json"\nputs JSON.generate([1, 2, 3])\n');
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  const originalSource = readFileSync(f.script, 'utf8');
+  try {
+    writeFileSync(configPath, JSON.stringify(defaults));
+    for (const outcome of ['allow', 'ask', 'deny', 'script changed', 'instruction changed', 'session changed'] as const) {
+      writeFileSync(f.script, originalSource);
+      const h = modelReviewHarness(f.cwd);
+      h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'run the verification script' } });
+      let requests = 0;
+      h.ctx.modelRegistry = {
+        getApiKeyForProvider: async () => 'fixture-key', getRegisteredProviderConfig: () => undefined,
+        getModelOfType: () => ({ api: 'typesafe-system-one', baseUrl: 'https://classifier.example.invalid/v1', id: defaults.model }),
+        classify: async (_model: unknown, context: any) => {
+          requests++;
+          assert.equal(context.state.operation.scripts[0].findings.load, 1);
+          assert.equal(context.state.operation.scripts[0].sourceOmitted, true);
+          assert(!JSON.stringify(context).includes(originalSource));
+          if (outcome === 'script changed') writeFileSync(f.script, 'system("delete something")');
+          if (outcome === 'instruction changed') h.handlers.get('input')!({ source: 'interactive', text: 'stop' });
+          if (outcome === 'session changed') h.handlers.get('session_before_switch')!({});
+          return outcome === 'deny' ? answer('DENY', 'improper') : outcome === 'ask' ? answer('ASK', 'scope') : answer();
+        },
+      };
+      const result = await h.attempt('bash', f.call.input);
+      assert.equal(requests, 1, outcome);
+      assert.equal(h.messages.length, 0, outcome);
+      if (outcome === 'allow') assert.equal(result, undefined);
+      else {
+        assert.equal(result.block, true, outcome);
+        if (outcome === 'ask') assert.equal(JSON.parse(result.reason).status, 'ASK_REVIEW_REQUIRED');
+        else if (outcome === 'deny') assert.match(result.reason, /^DENY:/);
+        else assert.match(result.reason, /changed/);
+      }
+    }
+  } finally { writeFileSync(configPath, savedConfig); f.clean(); }
 });

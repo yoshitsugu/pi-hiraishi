@@ -83,19 +83,23 @@ Keep these personal files private. The repository contains only sample settings.
 | Policy | Turns the facts and the classifier answer into ALLOW, ASK or DENY. |
 | Confirmation | Shows the stored operation and asks the human to approve it. |
 
-All operations sent to the classifier are checked against the requested goal and scope:
+The classifier focuses confirmation on consequential risk rather than requiring proof that every step is necessary:
 
-- Verified built-in `read`, `grep`, `find` and `ls` operations allow broad investigation by default unless the target may contain sensitive information, the user has prohibited the read, or it is clearly unrelated to the task. An uncertain connection alone does not require confirmation, and individual files need not be named in the request. Other reads, searches and listings must be reasonably related to the task. A related dependency outside the working directory is not automatically out of scope.
-- Local writes require stricter relevance: the change must be explicitly requested or necessary, and its targets, scope and impact must be proportionate. An unrelated edit requires confirmation even if small or reversible. Routine supporting edits and tests do not need a separate instruction naming each file.
+- Ordinary investigation, reads, searches, listings, local source edits, builds and tests default to ALLOW. Weak or uncertain relevance to the task alone does not require confirmation. Supporting work and related dependencies outside the working directory do not need instructions naming every file.
+- Explicit prohibitions, exclusions and revocations still apply to ordinary operations. Access to unrelated private personal documents can require confirmation for privacy reasons.
+- Confirmation concentrates on sensitive access, unapproved external writes or publication, broad deletion, loss of existing work, history rewriting, production changes, permissions, system-wide changes and genuinely unknown consequential effects. Explicit authorization can cover consequential work within its stated scope; local sensitive-data checks remain in effect.
+- Saving code does not execute it. Source edits are evaluated as file modifications, so execution, deletion or network logic in the saved body does not by itself trigger confirmation. Sensitive targets and possible secret values still require local confirmation.
 - External writes require explicit user authorization for the destination and action. A request to fix code does not by itself authorize pushing or posting it.
 
-Ordinary built-in reads also go through classification so that relevance and personal preferences can be evaluated. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
+Ordinary reads and edits still go through classification to respect user restrictions and personal preferences. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
+
+Recognized script invocations are inspected locally. Possible writes, deletion, network access or nested execution, sensitive source, and unreadable files require confirmation. Other inspected scripts use the classifier with findings counts, never source text or excerpts. Imports and the fact that a command runs code do not alone force confirmation. The script's resolved path and content hash are checked again after classification. Inspection uses heuristics and cannot establish the safety of arbitrary code or imported modules.
 
 The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence` (default `0.7` for all operations); policy guidance does not guarantee a particular model decision.
 
 ## What to expect
 
-- **ALLOW:** proceed with relevant reads, necessary proportionate local work, and explicitly authorized operations within scope.
+- **ALLOW:** proceed with ordinary investigation and local development without concrete consequential risk or explicit restrictions, and explicitly authorized consequential work within scope.
 - **ASK:** explain the proposed operation and request your approval before proceeding. Credential material that would leave the machine always lands here.
 - **DENY:** block operations the classifier reports as clearly improper, such as privilege abuse.
 
@@ -120,7 +124,7 @@ Isolation is disabled until you configure a trusted executor in your personal `c
 
 Merge this field into your classifier settings. `command` is an argument array; its first entry must be an absolute executable path. No shell expansion is performed. The executor is responsible for providing the target project's runtime, dependencies, filesystem restrictions, network restrictions and process isolation. It can wrap a container or another sandbox system. Hiraishi does not install runtimes or verify the executor's isolation guarantees.
 
-For a supported simple script invocation, the confirmation UI offers **Run with configured sandbox**. Configuring an executor does not grant automatic approval. Unconfigured, disabled, compound or unreadable invocations do not offer that choice. `sandboxVerification: false` disables the choice even when an executor is configured. A normal run remains a separate explicit approval.
+For a supported simple script invocation, the confirmation UI offers **Run with configured sandbox**. For operations requiring confirmation, configuring an executor does not grant automatic approval. Routine scripts that pass classification can run normally without opening the isolation UI. Unconfigured, disabled, compound or unreadable invocations do not offer that choice. `sandboxVerification: false` disables the choice even when an executor is configured. When confirmation is required, normal execution is a separate choice from isolation.
 
 After approval, Hiraishi checks the script's SHA-256 and resolved path again, then starts the executor in the project directory. The executor receives one JSON document on standard input:
 
