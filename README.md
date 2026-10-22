@@ -60,6 +60,10 @@ Merge this field into your endpoint and model settings. It accepts up to 8000 ch
 
 Preferences do not authorize a particular operation or remove the requirement for explicit authorization of external writes. They do not override local sensitive-data checks, script review, the allowlist, or the confidence threshold. An explicitly allowlisted command runs through the local approval path without the classifier or these extra instructions.
 
+To express preferences for ignored temporary files, the classifier receives `operation.gitIgnore` entries with an absolute `path` and an `ignored` value: `true`, `false`, or `null` when unknown. Hiraishi runs local `git check-ignore` with a one-second timeout and sends only the results, without ignore patterns or file contents. Git applies repository and nested `.gitignore` files, `.git/info/exclude`, `core.excludesFile`, negations and the index; tracked files are not reported as ignored.
+
+These facts cover built-in tool path arguments and up to 64 literal path candidates from simple shell commands, including `rm -rf tmp/file`. Compound commands and unquoted globs do not get ignore facts. Missing Git, Git errors, paths outside the working repository and symlink traversal leave status unknown. A missing entry is also unknown. Results are a snapshot, not automatic approval: an ignored directory does not establish the status of every descendant or the full effects of a command. Preferences such as allowing ordinary edits and deletion in ignored `tmp` paths can use these results; sensitive-data checks still apply.
+
 ## Allowlist
 
 Optionally save commands you trust in `~/.pi/agent/hiraishi/allowlist.json`:

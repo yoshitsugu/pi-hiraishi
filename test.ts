@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, classificationQuestions, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -32,6 +33,77 @@ export function answer(decision: Decision = 'ALLOW', reason = 'authorized', conf
 const change: Call = { tool: 'bash', builtin: true, input: { command: 'git reset --hard' } };
 const intents = [{ text: 'investigate the code' }];
 const state = prepare(intents, change, '/tmp').state!;
+test('Git ignore facts respect exclude sources, negation, tracking and literal paths without sending patterns', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-ignore-'));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: dir, env });
+  try {
+    git('init', '-q');
+    mkdirSync(join(dir, 'tmp'));
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(join(dir, 'src/.gitignore'), 'scratch/\n');
+    writeFileSync(join(dir, '.gitignore'), 'tmp/*\n!tmp/keep.txt\n# pattern text must stay local\n');
+    writeFileSync(join(dir, '.git/info/exclude'), 'local-only/\n');
+    const global = join(dir, 'global-ignore');
+    writeFileSync(global, 'global-only/\n');
+    git('config', 'core.excludesFile', global);
+    writeFileSync(join(dir, 'tmp/tracked.txt'), 'tracked');
+    git('add', '-f', 'tmp/tracked.txt');
+    const cases: [string, boolean][] = [
+      ['tmp/new.txt', true], ['tmp/space name.txt', true],
+      ['tmp/keep.txt', false], ['tmp/tracked.txt', false], ['src/new.ts', false],
+      ['local-only/new.txt', true], ['global-only/new.txt', true], ['src/scratch/new.txt', true], ['tmp', false],
+    ];
+    let requests = 0;
+    for (const [path, ignored] of cases) {
+      const call: Call = { tool: 'write', builtin: true, input: { path, content: 'saved source' } };
+      const verdict = await judge(intents, call, dir, defaults, mock(answer(), (_url, init) => {
+        requests++;
+        const { state } = JSON.parse(String(init.body));
+        assert.deepEqual(state.operation.gitIgnore, [{ path: join(dir, path), ignored }]);
+        assert(!String(init.body).includes('pattern text must stay local'));
+        assert(!String(init.body).includes(global));
+      }));
+      assert.equal(verdict.decision, 'ALLOW');
+    }
+    assert.equal(requests, cases.length);
+    const deletion: Call = { tool: 'bash', builtin: true, input: { command: 'rm -rf -- "tmp/space name.txt" tmp/new.txt' } };
+    assert.deepEqual(prepare(intents, deletion, dir).state!.operation.gitIgnore, [
+      { path: join(dir, 'tmp/space name.txt'), ignored: true }, { path: join(dir, 'tmp/new.txt'), ignored: true },
+    ]);
+    for (const command of ['rm -rf tmp/*', 'rm -rf tmp/new.txt && echo done', 'rm "$(echo tmp/new.txt)"'])
+      assert.equal(prepare(intents, { ...deletion, input: { command } }, dir).state!.operation.gitIgnore, undefined);
+    const read: Call = { tool: 'read', builtin: true, input: { path: 'tmp/new.txt' } };
+    assert.equal(prepare(intents, read, dir).state!.operation.gitIgnore![0]!.ignored, true);
+    assert.equal(prepare(intents, { ...read, builtin: false }, dir).state!.operation.gitIgnore, undefined);
+  } finally { rmSync(dir, { recursive: true }); }
+});
+
+test('Git ignore facts stay unknown for symlinks, paths outside the repository and unavailable Git', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-ignore-unknown-'));
+  const repo = join(dir, 'repo');
+  const outside = join(dir, 'outside');
+  const previousPath = process.env.PATH;
+  try {
+    mkdirSync(repo); mkdirSync(outside);
+    execFileSync('git', ['-c', 'core.fsmonitor=false', 'init', '-q'], { cwd: repo });
+    writeFileSync(join(repo, '.gitignore'), 'tmp/\n');
+    mkdirSync(join(repo, 'tmp'));
+    symlinkSync(outside, join(repo, 'tmp/escape'));
+    symlinkSync(join(dir, 'missing'), join(repo, 'tmp/dangling'));
+    const check = (path: string, cwd = repo) => prepare(intents, { tool: 'write', builtin: true, input: { path, content: '' } }, cwd).state!.operation.gitIgnore![0]!.ignored;
+    assert.equal(check('tmp/new.txt'), true);
+    assert.equal(check('tmp/escape/new.txt'), null);
+    assert.equal(check('tmp/dangling/new.txt'), null);
+    assert.equal(check('../outside/new.txt'), null);
+    assert.equal(check('new.txt', outside), null);
+    process.env.PATH = dir;
+    assert.equal(check('tmp/new.txt'), null);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true });
+  }
+});
 function mock(body: unknown = answer(), observe?: (url: string, init: RequestInit) => void): Services {
   return { env: { HIRAISHI_API_KEY: 'fixture-key' },
     fetch: async (url, init) => { observe?.(String(url), init!); return new Response(JSON.stringify(body)); } };
