@@ -1,0 +1,20 @@
+[
+  {
+    "endpoint": "https://classifier.example.invalid/v1/systemone",
+    "model": "candidate-a",
+    "apiKeyEnv": "HIRAISHI_API_KEY",
+    "auth": "bearer"
+  },
+  {
+    "endpoint": "https://classifier.example.invalid/v1/systemone",
+    "model": "candidate-b",
+    "apiKeyEnv": "HIRAISHI_API_KEY",
+    "auth": "bearer"
+  },
+  {
+    "endpoint": "https://classifier.example.invalid/v1/systemone",
+    "model": "candidate-c",
+    "apiKeyEnv": "HIRAISHI_API_KEY",
+    "auth": "bearer"
+  }
+]

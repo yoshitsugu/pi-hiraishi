@@ -1,0 +1,15 @@
+{
+  "endpoint": "https://classifier.example.invalid/v1/systemone",
+  "model": "your-classifier-model",
+  "apiKeyEnv": "HIRAISHI_API_KEY",
+  "auth": "bearer",
+  "minAllowConfidence": 0.8,
+  "timeoutMs": 5000,
+  "allowlistFile": "allowlist.json",
+  "sandboxVerification": true,
+  "explainBeforeAsk": true
+
+  // "locale": "ja"
+  // Uncomment to fix the interface language. Without it the locale follows
+  // LC_ALL, LC_MESSAGES or LANG, and English is used when none of them is set.
+}

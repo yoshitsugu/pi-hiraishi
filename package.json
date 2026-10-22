@@ -1,0 +1,45 @@
+{
+  "name": "pi-hiraishi",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.ts",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "evaluate": "node evaluate.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./hiraishi.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "description": "Hiraishi: intent-aware tool guard for pi with a configurable Jev-compatible classifier",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "hiraishi.ts",
+    "messages.ts",
+    "sandbox-runner.ts",
+    "config.sample.json",
+    "allowlist.sample.json",
+    "evaluation.sample.json",
+    "evaluate.ts",
+    "cases.ts",
+    "test.ts",
+    "tsconfig.json",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "version": "0.1.0",
+  "keywords": [
+    "pi-package"
+  ]
+}

@@ -1,0 +1,50 @@
+# Security limitations
+
+Hiraishi checks operations before they run to reduce unintended side effects.
+It does not fully analyze arbitrary code and does not isolate pi itself.
+
+## Trusted inputs
+
+User input paths, pi itself, configuration files, allowed endpoints and local programs are trusted.
+Anyone who can change the configuration or the allowlist can change the endpoint and the approval policy.
+If another extension in the same process forges event arguments or user records, that cannot be defended against.
+Clients that use RPC must also be authenticated.
+
+## Data sent to the external model
+
+The request sends the required user instructions, the operation, its targets, hints about side effects and the fact that recoverability is unverified.
+File bodies and existing file contents are never part of the decision input.
+Operations that touch credential material are confirmed locally instead, so neither the instruction nor the operation reaches the classifier for them.
+Possible sensitive data is handled by a local confirmation instead.
+Format detection has blind spots and cannot find every unknown secret value or personal data.
+For sensitive work, review the outgoing request before it is sent.
+No telemetry is added.
+Instructions inside the model input are separated and the response is validated, but prompt injection and model errors remain possible.
+An explanation written by the execution model can also be wrong.
+
+The local layer never inspects the wording of an instruction. A confirmation or a denial caused by a local fact is therefore the same in every language, and a revoked instruction is resolved by the classifier, not by a keyword. The classifier compares the same meaning across languages only as well as the model itself allows, so its DENY answer can still be wrong in one language and right in another.
+
+## Approval and state checks
+
+Approval is bound to the original operation and its arguments and can be used once.
+An assistant explanation never substitutes for human approval.
+Write, edit, identifiable simple bash local targets and recognized scripts are compared before and after the confirmation.
+Compound shells, redirects, variable expansion, targets decided inside configuration or program logic, and the targets of descendant symlinks are not fully pinned.
+Remote state is not pinned at all.
+State comparison and execution are not atomic, so a race between the final comparison and the execution remains.
+
+## Not observed
+
+Operations that do not pass through `tool_call` cannot be observed.
+That includes the user's `!` / `!!`, processes started inside extensions, communication, file operations and existing background jobs.
+Steps inside a tool stay invisible unless they are exposed as a new tool call.
+Nested `tool_call` events raised by `ctx.executeTool()` are observed.
+
+## Isolated execution on Linux
+
+Only a subset of recognized script invocations is isolated.
+It needs matching system paths and Linux namespaces.
+Secret data in the published code area that format detection cannot recognize may be readable from the script.
+Kernel vulnerabilities, malicious processes of the same user and host-wide resource exhaustion are not fully prevented.
+The execution limit applies per process and is not a cgroup limit on total usage.
+A failed isolation never falls back to a normal run.
