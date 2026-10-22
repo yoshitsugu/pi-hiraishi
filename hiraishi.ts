@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RUNTIMES, sandboxArguments, scriptSnapshot } from './sandbox-runner.ts';
+import { scriptSnapshot, validateSandbox, type SandboxConfig } from './sandbox-runner.ts';
 import { activeLocale, applyLocale, detectLocale, fmt, isLocale, messages, setLocale, type Locale, type Messages } from './messages.ts';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolInfo } from '@earendil-works/pi-coding-agent';
@@ -22,6 +22,7 @@ export interface Config {
   allowlistFile?: string;
   allowCommands?: string[][];
   sandboxVerification?: boolean;
+  sandbox?: SandboxConfig;
   explainBeforeAsk?: boolean;
   locale?: Locale;
 }
@@ -31,7 +32,7 @@ export const defaults: Config = {
 export function validateConfig(value: unknown): Config {
   if (!record(value)) throw new Error('invalid config');
   const c = { ...defaults, ...value };
-  if (Object.keys(value).some(key => !['endpoint', 'model', 'apiKeyEnv', 'auth', 'registryProvider', 'allowlistFile', 'allowCommands', 'minAllowConfidence', 'timeoutMs', 'sandboxVerification', 'explainBeforeAsk', 'locale'].includes(key)) ||
+  if (Object.keys(value).some(key => !['endpoint', 'model', 'apiKeyEnv', 'auth', 'registryProvider', 'allowlistFile', 'allowCommands', 'minAllowConfidence', 'timeoutMs', 'sandboxVerification', 'sandbox', 'explainBeforeAsk', 'locale'].includes(key)) ||
       typeof c.endpoint !== 'string' || typeof c.model !== 'string' ||
       (!!c.endpoint !== !!c.model) || (c.model !== '' && !/^[\w./:~-]{1,120}$/.test(c.model)) ||
       !['bearer', 'none'].includes(c.auth) || typeof c.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(c.apiKeyEnv) ||
@@ -45,6 +46,7 @@ export function validateConfig(value: unknown): Config {
         !c.allowCommands.every(argv => Array.isArray(argv) && argv.length > 0 && argv.length <= 32 &&
           argv.every(arg => typeof arg === 'string' && arg.length > 0 && arg.length <= 2048 && !/[\x00-\x1f\x7f-\x9f]/.test(arg))))))
     throw new Error('invalid config');
+  if (c.sandbox !== undefined) validateSandbox(c.sandbox);
   if (c.endpoint) {
     const url = new URL(c.endpoint);
     if (c.endpoint.length > 2048 || url.username || url.password || url.search || url.hash ||
@@ -404,7 +406,6 @@ export interface ScriptReview {
   source?: string;
   hidden: boolean;
   simple: boolean;
-  runtime?: string;
   originalRuntime?: string;
   args: string[];
   findings: Record<'read' | 'write' | 'delete' | 'network' | 'execute' | 'load', string[]>;
@@ -426,7 +427,7 @@ export function reviewScripts(call: Call, cwd: string): ScriptReview[] {
   return [...new Set(candidates)].slice(0, 3).map(candidate => {
     const path = resolve(cwd, candidate);
     const review: ScriptReview = { path, hidden: false, simple, args: simple ? argv!.slice(2) : [],
-      originalRuntime: simple ? argv![0] : undefined, runtime: simple ? RUNTIMES[interpreter] : undefined,
+      originalRuntime: simple ? argv![0] : undefined,
       findings: { read: [], write: [], delete: [], network: [], execute: [], load: [] } };
     if (sensitivePath(path, cwd) || privateText(path.replace(cwd, '[project-root]'))) { review.hidden = true; review.problem = t().script.hiddenPath; return review; }
     try {
@@ -495,21 +496,12 @@ export function scriptSummary(reviews: ScriptReview[], intent?: string): string 
     return lines.join('\n');
   }).join('\n\n');
 }
-function identicalRuntime(review: ScriptReview, cwd: string): boolean {
-  const name = review.originalRuntime;
-  if (!name || !review.runtime) return false;
-  const candidates = name.includes('/') ? [resolve(cwd, name)] : (process.env.PATH ?? '').split(':').map(dir => resolve(cwd, dir || '.', name));
+export function sandboxCommand(review: ScriptReview, cwd: string, config?: Config): string | undefined {
+  if (!config?.sandbox || config.sandboxVerification === false || !review.simple || !review.originalRuntime || !review.hash ||
+      review.source === undefined || review.hidden || review.path !== review.resolved) return;
   try {
-    const first = candidates.find(path => existsSync(path));
-    return !!first && realpathSync(first) === realpathSync(review.runtime);
-  } catch { return false; }
-}
-export function sandboxCommand(review: ScriptReview, cwd: string): string | undefined {
-  if (!review.simple || !review.runtime || !review.hash || !review.source || review.hidden || !review.path.startsWith('/tmp/') ||
-      review.path !== review.resolved || !existsSync('/usr/bin/bwrap') || !existsSync('/usr/bin/prlimit')) return;
-  try {
-    sandboxArguments(cwd, review.path, '/tmp/hiraishi-placeholder', review.runtime, review.args);
-    return `HIRAISHI_LOCALE=${activeLocale()} ${[process.execPath, fileURLToPath(new URL('./sandbox-runner.ts', import.meta.url)), review.path, review.hash, cwd, review.runtime, ...review.args].map(shellQuote).join(' ')}`;
+    const sandbox = validateSandbox(config.sandbox);
+    return `HIRAISHI_LOCALE=${activeLocale()} ${[process.execPath, fileURLToPath(new URL('./sandbox-runner.ts', import.meta.url)), JSON.stringify(sandbox), review.path, review.hash, cwd, review.originalRuntime, ...review.args].map(shellQuote).join(' ')}`;
   } catch { return; }
 }
 function unchanged(reviews: ScriptReview[]): boolean {
@@ -534,13 +526,8 @@ async function showSource(review: ScriptReview, ctx: ExtensionContext): Promise<
 }
 export async function approveScript(call: Call, reviews: ScriptReview[], ctx: ExtensionContext, config: Config, intents: Intent[], explanation?: ModelExplanation): Promise<{ block: true; reason: string } | undefined> {
   const blocked = (reason: string) => ({ block: true as const, reason });
-  const isolated = config.sandboxVerification !== false && reviews.length === 1 ? sandboxCommand(reviews[0]!, ctx.cwd) : undefined;
-  const safeShape = reviews.length === 1 && ['write', 'delete', 'network', 'execute'].every(key => reviews[0]!.findings[key as keyof ScriptReview['findings']].length === 0);
+  const isolated = reviews.length === 1 ? sandboxCommand(reviews[0]!, ctx.cwd, config) : undefined;
   if (ctx.signal?.aborted) return blocked(t().ui.aborted);
-  if (!explanation && isolated && safeShape && identicalRuntime(reviews[0]!, ctx.cwd) && /\b(?:assert|check|test|verify|expect)\b/.test(reviews[0]!.source ?? '')) {
-    call.input.command = isolated;
-    return;
-  }
   if (!ctx.hasUI) return blocked(t().ui.scriptConfirmRequired);
   const summary = scriptSummary(reviews, intents.at(-1)?.text);
   const command = privateValue(call.input) || SECRET_REF.test(stringify(call.input))
@@ -550,11 +537,11 @@ export async function approveScript(call: Call, reviews: ScriptReview[], ctx: Ex
   try {
     for (;;) {
       const choice = await ctx.ui.select(`${t().ui.titleScriptReview}\n${explanationText(explanation)}${t().ui.operationLabel}${command}\n${t().ui.checkLabel}${concreteRisk(call, ctx.cwd)}\n${summary}\n` +
-        (isolated ? fmt(t().ui.isolatedUses, { runtime: reviews[0]!.runtime ?? '' }) : t().ui.isolatedUnsupported),
+        (isolated ? fmt(t().ui.isolatedUses, { executor: config.sandbox!.command[0]! }) : t().ui.isolatedUnsupported),
         [...(isolated ? [sandboxLabel] : []), ...reviews.map((_, index) => fmt(t().ui.viewBody, { n: index + 1 })), t().ui.allowNormalRun, t().ui.reject]);
       if (ctx.signal?.aborted) return blocked(t().ui.aborted);
       if (choice?.startsWith(t().ui.viewBodyPrefix)) { const index = Number(choice.match(/\d+/)?.[0]) - 1; if (reviews[index]) await showSource(reviews[index]!, ctx); continue; }
-      if (choice !== sandboxLabel && choice !== t().ui.allowNormalRun) return blocked(t().ui.userRejected);
+      if (choice !== t().ui.allowNormalRun && (choice !== sandboxLabel || !isolated)) return blocked(t().ui.userRejected);
       if (!unchanged(reviews)) return blocked(t().ui.scriptChanged);
       if (choice === sandboxLabel && isolated) call.input.command = isolated;
       return;
@@ -766,9 +753,10 @@ export default function extension(pi: ExtensionAPI): void {
       const request = requests.get(id);
       if (!request || request.busy || request.expires < Date.now()) return reply(t().replies.missingRequest, 'missing_request');
       request.busy = true;
+      const originalCall = structuredClone(request.call);
       try {
         const valid = () => requests.get(id) === request && request.expires >= Date.now() && request.cwd === ctx.cwd &&
-          request.intents === intentKey(ctx) && request.stamp === operationStamp(request.call, ctx.cwd) && (!request.reviews.length || unchanged(request.reviews));
+          request.intents === intentKey(ctx) && request.stamp === operationStamp(originalCall, ctx.cwd) && (!request.reviews.length || unchanged(request.reviews));
         if (!valid()) return reply(t().replies.changedDuringReview, 'changed');
         const explanation = { summary: params.summary, reason: params.reason };
         const blocked = request.reviews.length
@@ -776,7 +764,7 @@ export default function extension(pi: ExtensionAPI): void {
           : await enforce(request.verdict, request.call, ctx, explanation);
         if (blocked) return reply(blocked.reason + ' ' + t().replies.notExecuted, 'not_approved');
         if (signal?.aborted || !valid()) return reply(t().replies.changedDuringApproval, 'changed');
-        grants.set(toolCallId, { key: callKey(request.call, ctx.cwd), cwd: ctx.cwd, intents: request.intents, stamp: request.stamp, reviews: request.reviews });
+        grants.set(toolCallId, { key: callKey(request.call, ctx.cwd), cwd: ctx.cwd, intents: request.intents, stamp: operationStamp(request.call, ctx.cwd), reviews: request.reviews });
         const outcome = await ctx.executeTool(request.call.tool, structuredClone(request.call.input), { signal });
         return { ...outcome.result, details: { hiraishi: { status: outcome.isError ? 'operation_failed_or_blocked' : 'executed' }, result: outcome.result.details } };
       } catch { return reply(t().replies.approvalFailed, 'failed'); }
@@ -839,9 +827,6 @@ export default function extension(pi: ExtensionAPI): void {
       const reviews = reviewScripts(call, ctx.cwd);
       if (reviews.length) {
         const config = loadConfig();
-        const isolated = config.sandboxVerification !== false && reviews.length === 1 ? sandboxCommand(reviews[0]!, ctx.cwd) : undefined;
-        const safeShape = reviews.length === 1 && ['write', 'delete', 'network', 'execute'].every(key => reviews[0]!.findings[key as keyof ScriptReview['findings']].length === 0);
-        if (isolated && safeShape && identicalRuntime(reviews[0]!, ctx.cwd) && /\b(?:assert|check|test|verify|expect)\b/.test(reviews[0]!.source ?? '') && !ctx.signal?.aborted) { call.input.command = isolated; return; }
         return config.explainBeforeAsk !== false ? requestReview(call, ask(t().verdicts.askScriptSideEffects), ctx, reviews)
           : await directApproval(() => approveScript(call, reviews, ctx, config, intents));
       }

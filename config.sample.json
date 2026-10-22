@@ -6,7 +6,6 @@
   "minAllowConfidence": 0.8,
   "timeoutMs": 5000,
   "allowlistFile": "allowlist.json",
-  "sandboxVerification": true,
   "explainBeforeAsk": true
 
   // "locale": "ja"

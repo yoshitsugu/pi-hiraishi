@@ -4,7 +4,7 @@ A pi extension that checks tool calls against your instructions before they run.
 
 ## Requirements
 
-pi 1.3.x and Node.js 22.19 or later. Tested on Linux; macOS and Windows are unverified. Optional script isolation requires Linux, bubblewrap, prlimit, and system Ruby or Python.
+pi 1.3.x and Node.js 22.19 or later. Tested on Linux; macOS and Windows are unverified. Optional script isolation uses an executor you configure for the target project; install its runtimes and dependencies in that environment.
 
 ## Install
 
@@ -77,9 +77,44 @@ Because the local layer never reads your words, a denial or a confirmation never
 
 Missing configuration, API failures, or uncertain decisions require confirmation rather than automatic approval. If confirmation is required but no UI is available, the operation is blocked.
 
-Set `explainBeforeAsk` to `false` for direct confirmation without an explanation from the execution model. Set `sandboxVerification` to `false` to disable optional script isolation.
+Set `explainBeforeAsk` to `false` for direct confirmation without an explanation from the execution model.
 
 Your instructions and operation details may be sent to the configured classifier. Hiraishi can make mistakes and does not cover every execution path. See [security limitations](./SECURITY.md).
+
+## Optional script isolation
+
+Isolation is disabled until you configure a trusted executor in your personal `config.json`:
+
+```json
+{
+  "sandbox": {
+    "command": ["/absolute/path/to/project-sandbox", "--profile", "development"],
+    "timeoutMs": 15000
+  }
+}
+```
+
+Merge this field into your classifier settings. `command` is an argument array; its first entry must be an absolute executable path. No shell expansion is performed. The executor is responsible for providing the target project's runtime, dependencies, filesystem restrictions, network restrictions and process isolation. It can wrap a container or another sandbox system. Hiraishi does not install runtimes or verify the executor's isolation guarantees.
+
+For a supported simple script invocation, the confirmation UI offers **Run with configured sandbox**. Configuring an executor does not grant automatic approval. Unconfigured, disabled, compound or unreadable invocations do not offer that choice. `sandboxVerification: false` disables the choice even when an executor is configured. A normal run remains a separate explicit approval.
+
+After approval, Hiraishi checks the script's SHA-256 and resolved path again, then starts the executor in the project directory. The executor receives one JSON document on standard input:
+
+```json
+{
+  "version": 1,
+  "cwd": "/project",
+  "script": "/tmp/verify.rb",
+  "hash": "<sha256>",
+  "source": "puts 1\n",
+  "runtime": "ruby",
+  "args": ["--example"]
+}
+```
+
+The executor must execute the supplied `source` in its isolated environment with the requested runtime and literal arguments. `script` identifies the reviewed file; reopening it on the host could execute content changed after review. Host paths may need mapping into the environment. The runtime field preserves the original executable name or path; Hiraishi does not substitute a system interpreter. The executor inherits the host environment and must filter environment variables and mount access before running code.
+
+Standard output and error are forwarded to pi. The executor's exit status is preserved; startup errors and timeouts fail the operation without retrying it as a normal run. `timeoutMs` defaults to 15000 and accepts 1 through 600000 milliseconds. The timeout kills the executor process; the executor must arrange cleanup of child processes, containers and remote jobs.
 
 ## Tests and model evaluation
 
@@ -89,7 +124,7 @@ npm run typecheck
 npm test
 ```
 
-Tests mock the classifier API. The full suite also requires Linux, git, curl, bash, system Ruby, bubblewrap, prlimit, and working user namespaces.
+Tests mock the classifier API and exercise the executor protocol with Node.js fixtures. The full suite also requires Linux, git, curl and bash; Ruby, Python and bubblewrap are not test dependencies. Isolation guarantees must be tested in the environment that provides your executor.
 
 To compare classifiers, copy `evaluation.sample.json` to `evaluation.json` and configure your candidates. Live API calls happen only with `--live`:
 

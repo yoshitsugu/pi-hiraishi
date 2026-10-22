@@ -40,11 +40,13 @@ That includes the user's `!` / `!!`, processes started inside extensions, commun
 Steps inside a tool stay invisible unless they are exposed as a new tool call.
 Nested `tool_call` events raised by `ctx.executeTool()` are observed.
 
-## Isolated execution on Linux
+## Configured isolation executor
 
-Only a subset of recognized script invocations is isolated.
-It needs matching system paths and Linux namespaces.
-Secret data in the published code area that format detection cannot recognize may be readable from the script.
-Kernel vulnerabilities, malicious processes of the same user and host-wide resource exhaustion are not fully prevented.
-The execution limit applies per process and is not a cgroup limit on total usage.
-A failed isolation never falls back to a normal run.
+Script isolation is opt-in and requires human approval. Hiraishi delegates it to the command in the trusted `sandbox` configuration; it does not provide an isolation mechanism itself.
+The executor must enforce filesystem access, network restrictions, environment filtering, resource limits and runtime dependencies for the target project.
+The executor inherits the host environment. Only a trusted executor should receive the reviewed source and launch code.
+Hiraishi checks the reviewed script hash and resolved path before handing its source to the executor. The executor must run that source rather than reopen a mutable host file.
+Loaded modules, project files and remote state are not snapshotted by Hiraishi.
+An executor timeout kills the executor process, not necessarily its descendants, containers or remote jobs. Their limits and cleanup belong to the execution environment.
+Executor startup failure, timeout or a nonzero exit never falls back to a normal run.
+Tests cover the executor protocol and failure handling; they do not establish that a configured environment provides isolation.

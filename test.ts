@@ -512,102 +512,100 @@ test('script source instructions do not grant approval and UI absence or cancel 
     assert((await approveScript(f.call, reviews, ctx, { ...defaults, sandboxVerification: false }, []))?.block);
   } finally { f.clean(); }
 });
-test('compatible system interpreter verification can automatically use enforced isolation', async () => {
-  const { reviewScripts, approveScript } = await import('./hiraishi.ts');
+function sandboxFixture(cwd: string, body: string) {
+  const executor = join(cwd, 'executor.cjs');
+  writeFileSync(executor, body);
+  return { command: [process.execPath, executor], timeoutMs: 2000 };
+}
+test('sandbox settings reject malformed executors and accept an explicit command', () => {
+  for (const sandbox of [null, {}, { command: [] }, { command: 'docker' }, { command: ['relative'] },
+    { command: ['/bin/tool', 'bad\nargument'] }, { command: ['/bin/tool'], timeoutMs: 0 },
+    { command: ['/bin/tool'], timeoutMs: 600001 }, { command: ['/bin/tool'], unknown: true }])
+    assert.throws(() => validateConfig({ sandbox }));
+  assert.deepEqual(validateConfig({ sandbox: { command: ['/bin/tool', '--isolate'] } }).sandbox?.command, ['/bin/tool', '--isolate']);
+});
+test('isolation requires configuration and human approval even for verification scripts', async () => {
+  const { reviewScripts, approveScript, sandboxCommand } = await import('./hiraishi.ts');
   const f = scriptFixture();
   try {
-    f.call.input.command = `/usr/bin/ruby ${f.script}`;
-    const ctx = { cwd: f.cwd, hasUI: false } as unknown as ExtensionContext;
-    assert.equal(await approveScript(f.call, reviewScripts(f.call, f.cwd), ctx, defaults, []), undefined);
+    const reviews = reviewScripts(f.call, f.cwd);
+    assert.equal(sandboxCommand(reviews[0]!, f.cwd), undefined);
+    const sandbox = sandboxFixture(f.cwd, 'process.exit(0)');
+    const config = { ...defaults, sandbox };
+    assert.equal(sandboxCommand(reviews[0]!, f.cwd, { ...config, sandboxVerification: false }), undefined);
+    assert((await approveScript(f.call, reviews, { cwd: f.cwd, hasUI: false } as ExtensionContext, config, []))?.block);
+    const ctx = { cwd: f.cwd, hasUI: true, ui: { select: async (title: string, options: string[]) => {
+      assert.match(title, /Sandbox executor/);
+      assert(!title.includes('exposed read-only'));
+      assert(options.includes('Run with configured sandbox'));
+      return 'Run with configured sandbox';
+    } } } as unknown as ExtensionContext;
+    assert.equal(await approveScript(f.call, reviews, ctx, config, []), undefined);
     assert.match(String(f.call.input.command), /sandbox-runner.ts/);
   } finally { f.clean(); }
 });
-test('scripts with explicit side effects need a sandbox choice or explicit normal approval', async () => {
-  const { reviewScripts, approveScript } = await import('./hiraishi.ts');
-  const f = scriptFixture('check = 1\nFile.write("output", "data")\n');
-  try {
-    f.call.input.command = `/usr/bin/ruby ${f.script}`;
-    assert((await approveScript(f.call, reviewScripts(f.call, f.cwd), { cwd: f.cwd, hasUI: false } as ExtensionContext, defaults, []))?.block);
-    const ctx = { cwd: f.cwd, hasUI: true, ui: { select: async () => 'Run in isolation (read-only code, no network)' } } as unknown as ExtensionContext;
-    assert.equal(await approveScript(f.call, reviewScripts(f.call, f.cwd), ctx, defaults, []), undefined);
-    assert.match(String(f.call.input.command), /sandbox-runner.ts/);
-  } finally { f.clean(); }
-});
-test('runtime mismatch prevents automatic substitution', async () => {
+test('unconfigured isolation does not offer a sandbox choice', async () => {
   const { reviewScripts, approveScript } = await import('./hiraishi.ts');
   const f = scriptFixture();
   try {
-    const fake = join(f.dir, 'ruby'); writeFileSync(fake, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
-    f.call.input.command = `${fake} ${f.script}`;
-    assert((await approveScript(f.call, reviewScripts(f.call, f.cwd), { cwd: f.cwd, hasUI: false } as ExtensionContext, defaults, []))?.block);
+    const ctx = { cwd: f.cwd, hasUI: true, ui: { select: async (_title: string, options: string[]) => {
+      assert(!options.includes('Run with configured sandbox'));
+      return 'Reject';
+    } } } as unknown as ExtensionContext;
+    assert((await approveScript(f.call, reviewScripts(f.call, f.cwd), ctx, defaults, []))?.block);
   } finally { f.clean(); }
 });
-test('sandbox plan exposes only code directories read-only and clears inherited environment', async () => {
-  const { sandboxArguments } = await import('./sandbox-runner.ts');
-  const f = scriptFixture();
-  try {
-    writeFileSync(join(f.cwd, '.env'), 'fixture'); mkdirSync(join(f.cwd, '.git'));
-    const args = sandboxArguments(f.cwd, f.script, join(f.dir, 'snapshot'), '/usr/bin/ruby', []);
-    assert(args.includes('--unshare-all')); assert(args.includes('--clearenv')); assert(args.includes('--disable-userns'));
-    assert(args.includes(join(f.cwd, 'lib'))); assert(!args.includes(join(f.cwd, '.env'))); assert(!args.includes(join(f.cwd, '.git')));
-    assert(!args.includes('--bind')); assert(!args.includes('--share-net'));
-    writeFileSync(join(f.cwd, 'lib', '.env'), 'fixture');
-    assert.throws(() => sandboxArguments(f.cwd, f.script, join(f.dir, 'snapshot'), '/usr/bin/ruby', []));
-  } finally { f.clean(); }
-});
-test('sandbox snapshots preserve bytes and reject source changes before execution', async () => {
-  const { scriptSnapshot, runSandbox } = await import('./sandbox-runner.ts');
+test('sandbox executor receives reviewed source, original runtime and literal arguments', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { reviewScripts, sandboxCommand } = await import('./hiraishi.ts');
   const f = scriptFixture('\ufeffcheck = 1\n');
   try {
-    const snap = scriptSnapshot(f.script);
-    assert.equal(snap.source.charCodeAt(0), 0xfeff);
-    writeFileSync(f.script, 'check = 2\n');
-    assert.throws(() => runSandbox(f.script, snap.hash, f.cwd, '/usr/bin/ruby', []), /changed/);
+    const output = join(f.cwd, 'request.json');
+    const sandbox = sandboxFixture(f.cwd, `let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => require('node:fs').writeFileSync(process.argv[2], input));`);
+    sandbox.command.push(output);
+    const args = ['hello world', '$(touch injected)', "quote's", '--flag'];
+    const { scriptSnapshot } = await import('./sandbox-runner.ts');
+    const review = reviewScripts(f.call, f.cwd)[0]!;
+    review.originalRuntime = '/custom/runtime'; review.args = args;
+    const command = sandboxCommand(review, f.cwd, { ...defaults, sandbox })!;
+    assert(command);
+    execFileSync('bash', ['--noprofile', '--norc', '-c', command], { cwd: f.cwd, stdio: 'pipe' });
+    assert.equal((await import('node:fs')).existsSync(join(f.cwd, 'injected')), false);
+    const request = JSON.parse(readFileSync(output, 'utf8'));
+    assert.deepEqual(request, { version: 1, cwd: f.cwd, script: f.script, hash: scriptSnapshot(f.script).hash,
+      source: '\ufeffcheck = 1\n', runtime: '/custom/runtime', args });
   } finally { f.clean(); }
 });
-test('concrete risk explains the actual consequence instead of an abstract category', async () => {
-  const { concreteRisk } = await import('./hiraishi.ts');
-  assert.match(concreteRisk(change), /uncommitted changes/);
-  assert.match(concreteRisk({ ...change, input: { command: 'git clean -fd' } }), /cannot be restored by Git/);
-  assert.match(concreteRisk({ ...change, input: { command: 'git push' } }), /collaborators/);
-  assert.match(concreteRisk({ tool: 'write', builtin: true, input: { path: 'file' } }), /overwritten/);
-  assert.doesNotMatch(concreteRisk(change), /recoverability/);
-});
-test('real sandbox prevents project writes, hides secrets, clears keys and blocks host networking', async () => {
-  const { execFileSync } = await import('node:child_process');
-  const { fileURLToPath } = await import('node:url');
-  const { scriptSnapshot } = await import('./sandbox-runner.ts');
-  const { createServer } = await import('node:net');
-  const f = scriptFixture();
-  const server = createServer(socket => socket.destroy());
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const port = (server.address() as { port: number }).port;
-    writeFileSync(join(f.cwd, 'lib', 'value.rb'), 'VALUE = 42\n');
-    writeFileSync(join(f.cwd, '.env'), 'SECRET=fixture\n');
-    const outside = join(f.dir, 'outside.txt'); writeFileSync(outside, 'original');
-    writeFileSync(f.script, `require 'socket'\nrequire '${f.cwd}/lib/value'\nraise 'read failed' unless VALUE == 42\nraise 'secret exposed' if File.exist?('${f.cwd}/.env')\nraise 'env leaked' if ENV['PI_HIRAISHI_TEST_SECRET']\nbegin\n File.write('${f.cwd}/lib/changed.rb', 'bad')\n raise 'project write succeeded'\nrescue Errno::EROFS, Errno::EACCES\nend\nFile.write('${outside}', 'sandbox only')\nbegin\n TCPSocket.new('127.0.0.1', ${port})\n raise 'host network reached'\nrescue Errno::ECONNREFUSED, Errno::ENETUNREACH\nend\nputs 'isolation-ok'\n`);
-    const snap = scriptSnapshot(f.script);
-    const output = execFileSync(process.execPath, [fileURLToPath(new URL('./sandbox-runner.ts', import.meta.url)), f.script, snap.hash, f.cwd, '/usr/bin/ruby'], {
-      encoding: 'utf8', env: { ...process.env, PI_HIRAISHI_TEST_SECRET: 'fixture' }, timeout: 20000,
-    });
-    assert.match(output, /isolation-ok/);
-    assert.equal(readFileSync(outside, 'utf8'), 'original');
-    assert.equal(readFileSync(join(f.cwd, 'lib', 'value.rb'), 'utf8'), 'VALUE = 42\n');
-  } finally { await new Promise<void>(resolve => server.close(() => resolve())); f.clean(); }
-});
-test('sandbox setup failure does not fall back to normal execution', async () => {
-  const { execFileSync } = await import('node:child_process');
-  const { fileURLToPath } = await import('node:url');
+test('sandbox rejects changed script content or symlink replacement before starting the executor', async () => {
+  const { runSandbox, scriptSnapshot } = await import('./sandbox-runner.ts');
   const { existsSync } = await import('node:fs');
-  const { scriptSnapshot } = await import('./sandbox-runner.ts');
   const f = scriptFixture();
   try {
-    const marker = join(f.cwd, 'marker');
-    writeFileSync(f.script, `File.write('${marker}', 'bad')\n`);
-    writeFileSync(join(f.cwd, 'lib', '.env'), 'fixture');
+    const marker = join(f.cwd, 'started');
+    const sandbox = sandboxFixture(f.cwd, `require('node:fs').writeFileSync(process.argv[2], 'started')`);
+    sandbox.command.push(marker);
     const snap = scriptSnapshot(f.script);
-    assert.throws(() => execFileSync(process.execPath, [fileURLToPath(new URL('./sandbox-runner.ts', import.meta.url)), f.script, snap.hash, f.cwd, '/usr/bin/ruby'], { stdio: 'pipe' }));
+    writeFileSync(f.script, 'check = 2\n');
+    assert.throws(() => runSandbox(f.script, snap.hash, f.cwd, 'ruby', [], sandbox), /changed/);
+    rmSync(f.script);
+    const target = join(f.dir, 'target.rb'); writeFileSync(target, snap.source); symlinkSync(target, f.script);
+    assert.throws(() => runSandbox(f.script, snap.hash, f.cwd, 'ruby', [], sandbox), /changed/);
+    assert.equal(existsSync(marker), false);
+  } finally { f.clean(); }
+});
+test('executor failure, timeout or missing executable never falls back to running the script', async () => {
+  const { runSandbox, scriptSnapshot } = await import('./sandbox-runner.ts');
+  const { existsSync } = await import('node:fs');
+  const f = scriptFixture();
+  try {
+    const marker = join(f.cwd, 'script-ran');
+    writeFileSync(f.script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`);
+    const snap = scriptSnapshot(f.script);
+    const sandbox = sandboxFixture(f.cwd, 'process.exit(7)');
+    assert.equal(runSandbox(f.script, snap.hash, f.cwd, process.execPath, [], sandbox), 7);
+    assert.throws(() => runSandbox(f.script, snap.hash, f.cwd, process.execPath, [], { command: [join(f.dir, 'missing')] }));
+    writeFileSync(sandbox.command[1]!, 'setInterval(() => {}, 1000)');
+    assert.throws(() => runSandbox(f.script, snap.hash, f.cwd, process.execPath, [], { ...sandbox, timeoutMs: 50 }), /exceeded/);
     assert.equal(existsSync(marker), false);
   } finally { f.clean(); }
 });
@@ -656,7 +654,8 @@ test('autoload entry re-export resolves helper imports and helper execution path
   writeFileSync(entry, 'export { default } from "../../hiraishi/hiraishi.ts";\n');
   const script = join(root, 'verify.rb'); writeFileSync(script, 'check = 1\nputs check\n');
   const oldConfig = process.env.HIRAISHI_CONFIG;
-  process.env.HIRAISHI_CONFIG = join(testConfigRoot, 'config.json');
+  process.env.HIRAISHI_CONFIG = join(root, 'config.json');
+  writeFileSync(process.env.HIRAISHI_CONFIG, JSON.stringify({ sandbox: { command: [process.execPath] }, explainBeforeAsk: false }));
   try {
     const { discoverAndLoadExtensions } = await import('@earendil-works/pi-coding-agent');
     const loaded = await discoverAndLoadExtensions([], root, join(root, 'agent'));
@@ -671,7 +670,7 @@ test('autoload entry re-export resolves helper imports and helper execution path
       getAllTools: () => [{ name: 'bash', sourceInfo: { source: 'builtin', path: 'builtin:bash' } }],
     });
     const event = { toolName: 'bash', input: { command: `/usr/bin/ruby ${script}` } };
-    const result = await handlers.get('tool_call')!(event, { cwd: project, hasUI: false, sessionManager: { getBranch: () => [] } });
+    const result = await handlers.get('tool_call')!(event, { cwd: project, hasUI: true, ui: { select: async () => 'Run with configured sandbox' }, sessionManager: { getBranch: () => [] } });
     assert.equal(result, undefined);
     assert(event.input.command.includes(join(real, 'sandbox-runner.ts')), event.input.command);
     assert(!event.input.command.includes(join(extensions, 'sandbox-runner.ts')));
@@ -871,6 +870,24 @@ test('script ASK explanations precede source UI; the approval tool executes the 
     assert.equal(result.details.hiraishi.status, 'executed'); assert.equal(h.executed.length, 1);
     assert.match(h.messages[0]!, /Explanation by the execution model/);
   } finally { f.clean(); }
+});
+test('configured sandbox approval executes only the rewritten stored operation once', async () => {
+  const f = scriptFixture();
+  const path = process.env.HIRAISHI_CONFIG!;
+  const saved = readFileSync(path, 'utf8');
+  try {
+    const sandbox = sandboxFixture(f.cwd, 'process.exit(0)');
+    writeFileSync(path, JSON.stringify({ sandbox }));
+    const h = modelReviewHarness(f.cwd, 'Run with configured sandbox');
+    const request = JSON.parse((await h.attempt('bash', f.call.input)).reason);
+    assert.equal(request.status, 'ASK_REVIEW_REQUIRED');
+    assert.equal(h.executed.length, 0);
+    const result = await h.explain(request.requestId, 'runs the script in the configured environment', 'isolation is provided by the configured executor');
+    assert.equal(result.details.hiraishi.status, 'executed');
+    assert.equal(h.executed.length, 1);
+    assert.match(h.executed[0]!.input.command as string, /sandbox-runner.ts/);
+    assert.equal((await h.explain(request.requestId)).details.status, 'missing_request');
+  } finally { writeFileSync(path, saved); f.clean(); }
 });
 test('pending script changes invalidate the explanation and approval', async () => {
   const f = scriptFixture('puts "ordinary script"\n');
