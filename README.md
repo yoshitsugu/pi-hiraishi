@@ -46,6 +46,16 @@ The default `minAllowConfidence` is `0.7`. An explicit value in your personal co
 
 Restart pi or run `/reload`, then send your next instruction. Personal settings are separate from the installed package. `HIRAISHI_CONFIG` can point to another config file; a custom pi agent directory also changes the default settings location.
 
+## Reusing human approvals
+
+Hiraishi remembers human-approved operation summaries in memory for the current session. On subsequent classified operations, the model compares the proposed action with unexpired approvals and can ALLOW an operation with equivalent or lower risk. Arguments need not match exactly, but targets, destinations, scope, data exposure and side effects must remain within the approved risk. Later user prohibitions and revocations still apply. This is a model judgment, not a deterministic equivalence check; classifier failure or an uncertain answer requires confirmation.
+
+Set `"approvalTtlMs": 3600000` in your personal config to control the lifetime in milliseconds; one hour is the default and `0` disables reuse. A confident ALLOW that names an equivalent approval updates only that entry's timestamp. The original operation summary stays unchanged and no new entry is added, so a chain of progressively broader operations is always compared with the original human approval. A normal classifier ALLOW without a matching approval does not create or refresh history.
+
+Expired entries are removed before classification. History is limited to 16 entries and 12,000 serialized UTF-8 bytes per request; oversized summaries are not retained. Entries contain the same operation summaries used for classification, without file bodies or script source. Session changes, forks, tree navigation, reloads and configuration changes clear the history. Ordinary new user messages keep history and are included in the next classification so that restrictions can override prior approval. No history is saved to disk.
+
+Sensitive operations and unreadable or hidden scripts continue to require local confirmation and are not retained. A script with recognized side effects can use equivalence classification only when a human-approved script's hash and resolved path still match; changed source requires confirmation. Choosing configured isolation does not grant reusable permission to run the original script normally.
+
 ## Personal decision preferences
 
 Add `additionalInstructions` to your personal `config.json` to refine the classifier's scope and confirmation preferences:
@@ -97,7 +107,7 @@ The classifier focuses confirmation on consequential risk rather than requiring 
 
 Ordinary reads and edits still go through classification to respect user restrictions and personal preferences. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
 
-Recognized script invocations are inspected locally. Possible writes, deletion, network access or nested execution, sensitive source, and unreadable files require confirmation. Other inspected scripts use the classifier with findings counts, never source text or excerpts. Imports and the fact that a command runs code do not alone force confirmation. The script's resolved path and content hash are checked again after classification. Inspection uses heuristics and cannot establish the safety of arbitrary code or imported modules.
+Recognized script invocations are inspected locally. Possible writes, deletion, network access or nested execution require confirmation unless an unexpired human approval for the unchanged script supports an equivalent-risk ALLOW. Sensitive source and unreadable files always require local confirmation. Other inspected scripts use the classifier with findings counts, never source text or excerpts. Imports and the fact that a command runs code do not alone force confirmation. The script's resolved path and content hash are checked again after classification. Inspection uses heuristics and cannot establish the safety of arbitrary code or imported modules.
 
 The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence` (default `0.7` for all operations); policy guidance does not guarantee a particular model decision.
 

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, classificationQuestions, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
+import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
@@ -33,6 +33,83 @@ export function answer(decision: Decision = 'ALLOW', reason = 'authorized', conf
 const change: Call = { tool: 'bash', builtin: true, input: { command: 'git reset --hard' } };
 const intents = [{ text: 'investigate the code' }];
 const state = prepare(intents, change, '/tmp').state!;
+test('approval lifetime defaults to one hour and accepts only nonnegative integer milliseconds', () => {
+  assert.equal(validateConfig({}).approvalTtlMs, 3600000);
+  for (const approvalTtlMs of [0, 1, 60000, 3600000]) assert.equal(validateConfig({ approvalTtlMs }).approvalTtlMs, approvalTtlMs);
+  for (const approvalTtlMs of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '3600000', null])
+    assert.throws(() => validateConfig({ approvalTtlMs }));
+});
+function approvalAnswer(approvals: HumanApproval[], selected = 'none', decision: Decision = 'ALLOW', confidence = 0.99) {
+  const body = answer(decision, selected === 'none' ? 'necessary' : 'authorized');
+  const keys = ['none', ...approvals.map(approval => approval.id)];
+  return { ...body, answers: { ...body.answers, approval: { type: 'choice', choice: selected, confidence,
+    probabilities: Object.fromEntries(keys.map(key => [key, key === selected ? 0.99 : 0.01 / (keys.length - 1)])) } } };
+}
+function reviewRegistry(classifier: (state: State) => unknown): NonNullable<Services['registry']> {
+  return {
+    getApiKeyForProvider: async () => 'fixture-key', getRegisteredProviderConfig: () => undefined,
+    getModelOfType: () => ({ api: 'typesafe-system-one', baseUrl: 'https://classifier.example.invalid/v1', id: defaults.model }),
+    classify: async (_model: unknown, context: any) => classifier(context.state),
+  } as unknown as NonNullable<Services['registry']>;
+}
+test('approval history refreshes timestamps without replacing the original operation and prunes expiry', () => {
+  const originalNow = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  const config = { ...defaults, approvalTtlMs: 100 };
+  const history = new ApprovalHistory();
+  try {
+    history.remember(state.operation, 1, config);
+    const first = history.current(config)[0]!;
+    now = 1099;
+    assert.equal(history.refresh(first.id, config), true);
+    assert.deepEqual(history.current(config), [{ ...first, approvedAt: now }]);
+    now = 1199;
+    assert.deepEqual(history.current(config), []);
+    assert.equal(history.refresh(first.id, config), false);
+    history.remember(state.operation, 2, config);
+    assert.deepEqual(history.current({ ...config, additionalInstructions: 'Ask before editing.' }), []);
+    history.remember(state.operation, 2, { ...config, approvalTtlMs: 0 });
+    assert.deepEqual(history.current({ ...config, approvalTtlMs: 0 }), []);
+    history.remember(state.operation, 2, config);
+    now -= 1;
+    assert.deepEqual(history.current(config), []);
+  } finally { Date.now = originalNow; }
+});
+test('approval history bounds both entry count and serialized bytes and deduplicates repeated human approvals', () => {
+  const history = new ApprovalHistory();
+  for (let i = 0; i < 25; i++) history.remember({ ...state.operation, input: { command: `echo ${i}` } }, 1, defaults);
+  assert.equal(history.current(defaults).length, 16);
+  history.clear();
+  for (let i = 0; i < 3; i++) history.remember(state.operation, 1, defaults);
+  assert.equal(history.current(defaults).length, 1);
+  history.clear();
+  for (let i = 0; i < 20; i++) history.remember({ ...state.operation, input: { contentOmitted: true, label: 'x'.repeat(2000) + i } }, 1, defaults);
+  const entries = history.current(defaults);
+  assert(entries.length > 0 && entries.length < 16);
+  assert(Buffer.byteLength(JSON.stringify(entries)) <= 12000);
+  history.clear();
+  history.remember({ ...state.operation, input: { label: 'x'.repeat(12000) } }, 1, defaults);
+  assert.deepEqual(history.current(defaults), []);
+});
+test('equivalence answers must name a supplied approval, be confident and agree with the decision reason', async () => {
+  const approvals: HumanApproval[] = [{ id: 'approval_fixture', approvedAt: 1000, userInstructionCount: 1, operation: state.operation }];
+  const reused = parseResult(approvalAnswer(approvals, approvals[0]!.id), defaults, approvals);
+  assert.equal(reused.decision, 'ALLOW'); assert.equal(reused.matchedApprovalId, approvals[0]!.id);
+  assert.equal(parseResult(approvalAnswer(approvals), defaults, approvals).matchedApprovalId, undefined);
+  assert.equal(parseResult(approvalAnswer(approvals, approvals[0]!.id, 'ALLOW', 0.4), defaults, approvals).decision, 'ASK');
+  assert.throws(() => parseResult(answer(), defaults, approvals));
+  assert.throws(() => parseResult(approvalAnswer(approvals, 'approval_invented'), defaults, approvals));
+  const contradiction = approvalAnswer(approvals, approvals[0]!.id);
+  contradiction.answers.reason = answer('ALLOW', 'necessary').answers.reason;
+  assert.equal(parseResult(contradiction, defaults, approvals).decision, 'ASK');
+  const withHistory = { ...state, priorApprovals: approvals };
+  assert.equal((await classify(withHistory, defaults, mock(approvalAnswer(approvals, approvals[0]!.id), (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    assert.deepEqual(body.state.priorApprovals, approvals);
+    assert.deepEqual(Object.keys(body.questions.approval.criteria), ['none', approvals[0]!.id]);
+  }))).matchedApprovalId, approvals[0]!.id);
+});
 test('Git ignore facts respect exclude sources, negation, tracking and literal paths without sending patterns', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'hiraishi-ignore-'));
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
@@ -852,6 +929,157 @@ function modelReviewHarness(cwd: string, choice: string | undefined = 'Allow thi
   return { handlers, tools, ctx, attempt, explain, executed, messages, entries, mutateNested: (fn: typeof modifyNested) => { modifyNested = fn; } };
 }
 const workflowBody = 'name: Build and attest gem\non:\n  workflow_call:\npermissions:\n  contents: read\njobs:\n  build:\n    permissions:\n      id-token: write\n      attestations: write\n    steps:\n      - name: Run tests\n        run: bundle exec rspec\n';
+test('equivalent operations refresh one original approval across messages and expire before transmission', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-equivalence-'));
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    writeFileSync(configPath, JSON.stringify({ ...defaults, approvalTtlMs: 100 }));
+    const h = modelReviewHarness(dir);
+    h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'update local files' } });
+    let latest: State | undefined;
+    let restrict = false;
+    h.ctx.modelRegistry = reviewRegistry(current => {
+      latest = current;
+      return current.priorApprovals?.length
+        ? approvalAnswer(current.priorApprovals, restrict ? 'none' : current.priorApprovals[0]!.id, restrict ? 'ASK' : 'ALLOW')
+        : answer('ASK', 'uncertain');
+    });
+    const input = { path: join(dir, 'first.ts'), content: 'first source' };
+    const request = JSON.parse((await h.attempt('write', input)).reason);
+    assert.equal((await h.explain(request.requestId)).details.hiraishi.status, 'executed');
+    now += 90;
+    assert.equal(await h.attempt('write', { path: join(dir, 'second.ts'), content: 'second source' }), undefined);
+    const id = latest!.priorApprovals![0]!.id;
+    const message = 'also update another local file';
+    h.handlers.get('input')!({ source: 'interactive', text: message });
+    h.handlers.get('message_start')!({ message: { role: 'user', content: message } });
+    now += 90;
+    assert.equal(await h.attempt('write', { path: join(dir, 'third.ts'), content: 'third source' }), undefined);
+    assert.equal(latest!.priorApprovals!.length, 1);
+    assert.equal(latest!.priorApprovals![0]!.id, id);
+    assert.equal(latest!.priorApprovals![0]!.approvedAt, now - 90);
+    assert.equal(latest!.priorApprovals![0]!.operation.input.path, input.path);
+    assert.equal(latest!.priorApprovals![0]!.userInstructionCount, 1);
+    assert.equal(latest!.currentUserInstruction, message);
+    assert(!JSON.stringify(latest).includes(input.content));
+    assert.equal(h.messages.length, 1);
+    restrict = true;
+    const stop = 'do not edit any more files';
+    h.handlers.get('input')!({ source: 'interactive', text: stop });
+    h.handlers.get('message_start')!({ message: { role: 'user', content: stop } });
+    assert.equal(JSON.parse((await h.attempt('write', input)).reason).status, 'ASK_REVIEW_REQUIRED');
+    now += 100;
+    assert.equal(JSON.parse((await h.attempt('write', input)).reason).status, 'ASK_REVIEW_REQUIRED');
+    assert.equal(latest!.priorApprovals, undefined);
+  } finally { Date.now = originalNow; writeFileSync(configPath, savedConfig); rmSync(dir, { recursive: true }); }
+});
+test('session boundaries, settings changes and zero TTL prevent reuse of human approvals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-approval-session-'));
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  try {
+    for (const boundary of ['session_start', 'session_before_switch', 'session_before_fork', 'session_tree', 'session_shutdown', 'settings', 'disabled']) {
+      writeFileSync(configPath, JSON.stringify({ ...defaults, approvalTtlMs: boundary === 'disabled' ? 0 : 3600000 }));
+      const h = modelReviewHarness(dir);
+      h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'edit local files' } });
+      let latest: State | undefined;
+      h.ctx.modelRegistry = reviewRegistry(current => {
+        latest = current;
+        return current.priorApprovals ? approvalAnswer(current.priorApprovals, current.priorApprovals[0]!.id) : answer('ASK', 'uncertain');
+      });
+      const input = { path: join(dir, 'file'), content: 'hello' };
+      const request = JSON.parse((await h.attempt('write', input)).reason);
+      await h.explain(request.requestId);
+      if (boundary === 'settings') writeFileSync(configPath, JSON.stringify({ ...defaults, additionalInstructions: 'Ask before editing.' }));
+      else if (boundary !== 'disabled') h.handlers.get(boundary)!({});
+      assert.equal(JSON.parse((await h.attempt('write', input)).reason).status, 'ASK_REVIEW_REQUIRED', boundary);
+      assert.equal(latest!.priorApprovals, undefined, boundary);
+    }
+  } finally { writeFileSync(configPath, savedConfig); rmSync(dir, { recursive: true }); }
+});
+test('direct human approval seeds history but classifier ALLOW, refusal and sensitive operations do not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-approval-origin-'));
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  try {
+    writeFileSync(configPath, JSON.stringify({ ...defaults, explainBeforeAsk: false }));
+    for (const origin of ['human', 'classifier', 'refused', 'sensitive']) {
+      const h = modelReviewHarness(dir, origin === 'refused' ? 'Reject' : 'Allow this change');
+      h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'update local files' } });
+      let latest: State | undefined;
+      h.ctx.modelRegistry = reviewRegistry(current => {
+        latest = current;
+        return current.priorApprovals ? approvalAnswer(current.priorApprovals, current.priorApprovals[0]!.id)
+          : answer(origin === 'classifier' ? 'ALLOW' : 'ASK', origin === 'classifier' ? 'necessary' : 'uncertain');
+      });
+      await h.attempt('write', { path: join(dir, origin === 'sensitive' ? '.env' : 'first'), content: 'hello' });
+      await h.attempt('write', { path: join(dir, 'second'), content: 'hello again' });
+      assert.equal(latest!.priorApprovals?.length, origin === 'human' ? 1 : undefined, origin);
+      if (origin === 'human') assert.equal(h.messages.length, 1);
+    }
+  } finally { writeFileSync(configPath, savedConfig); rmSync(dir, { recursive: true }); }
+});
+test('expiry during classification and session changes cannot grant or refresh approval', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-approval-race-'));
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    writeFileSync(configPath, JSON.stringify({ ...defaults, approvalTtlMs: 100 }));
+    for (const change of ['expire', 'session']) {
+      const h = modelReviewHarness(dir);
+      h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'update local files' } });
+      h.ctx.modelRegistry = reviewRegistry(current => {
+        if (!current.priorApprovals) return answer('ASK', 'uncertain');
+        if (change === 'expire') now += 100;
+        else h.handlers.get('session_before_switch')!({});
+        return approvalAnswer(current.priorApprovals, current.priorApprovals[0]!.id);
+      });
+      const input = { path: join(dir, 'file'), content: 'hello' };
+      const request = JSON.parse((await h.attempt('write', input)).reason);
+      await h.explain(request.requestId);
+      const result = await h.attempt('write', input);
+      assert.equal(result.block, true);
+      if (change === 'expire') assert.match(JSON.parse(result.reason).hiraishiReason, /expired/);
+      else assert.match(result.reason, /changed/);
+    }
+  } finally { Date.now = originalNow; writeFileSync(configPath, savedConfig); rmSync(dir, { recursive: true }); }
+});
+test('approved script effects can be compared without source transmission but changed source still needs review', async () => {
+  const f = scriptFixture('File.write("output.txt", "hello")\n');
+  const configPath = process.env.HIRAISHI_CONFIG!;
+  const savedConfig = readFileSync(configPath, 'utf8');
+  try {
+    writeFileSync(configPath, JSON.stringify(defaults));
+    const h = modelReviewHarness(f.cwd, 'Allow normal run (no isolation)');
+    h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'run the verification script' } });
+    let requests = 0;
+    let selectApproval = true;
+    h.ctx.modelRegistry = reviewRegistry(current => {
+      requests++;
+      assert.equal(current.priorApprovals!.length, 1);
+      assert.equal(current.operation.scripts![0]!.hash, current.priorApprovals![0]!.operation.scripts![0]!.hash);
+      assert(!JSON.stringify(current).includes('File.write'));
+      return approvalAnswer(current.priorApprovals!, selectApproval ? current.priorApprovals![0]!.id : 'none');
+    });
+    const request = JSON.parse((await h.attempt('bash', f.call.input)).reason);
+    assert.equal((await h.explain(request.requestId)).details.hiraishi.status, 'executed');
+    assert.equal(await h.attempt('bash', f.call.input), undefined);
+    assert.equal(requests, 1);
+    selectApproval = false;
+    assert.equal(JSON.parse((await h.attempt('bash', f.call.input)).reason).status, 'ASK_REVIEW_REQUIRED');
+    assert.equal(requests, 2);
+    writeFileSync(f.script, 'File.write("other.txt", "changed")\n');
+    assert.equal(JSON.parse((await h.attempt('bash', f.call.input)).reason).status, 'ASK_REVIEW_REQUIRED');
+    assert.equal(requests, 2);
+  } finally { writeFileSync(configPath, savedConfig); f.clean(); }
+});
 test('file summary presents workflow purpose and permissions without raw JSON', async () => {
   const { filePresentation } = await import('./hiraishi.ts');
   const dir = mkdtempSync(join(tmpdir(), 'hiraishi-workflow-'));

@@ -13,6 +13,7 @@ export interface Messages {
     askNoIntents: string;
     askTooLarge: string;
     askScriptSideEffects: string;
+    askApprovalExpired: string;
     judgeInvalidConfig: string;
     judgeUnavailable: string;
     insufficient: string;
@@ -131,6 +132,7 @@ const en: Messages = {
     askNoIntents: 'the trusted user instructions could not be read safely',
     askTooLarge: 'the operation is too large to evaluate without dropping information',
     askScriptSideEffects: 'the script has possible writes, deletion, network or nested execution, or could not be inspected safely',
+    askApprovalExpired: 'the prior approval expired during classification; confirmation is required',
     judgeInvalidConfig: 'the allowlist or classifier settings are invalid',
     judgeUnavailable: 'the classifier service is unavailable, so confirmation is required',
     insufficient: 'ALLOW confidence is below the configured threshold',
@@ -273,6 +275,7 @@ const ja: Messages = {
     askNoIntents: '信頼できるユーザー指示を解析できません',
     askTooLarge: '操作が大きすぎ、情報を落とさずに評価できません',
     askScriptSideEffects: 'スクリプトに書き込み・削除・通信・別の処理の実行の可能性があるか、安全に内容を調べられないため確認します',
+    askApprovalExpired: '判定中に以前の承認が失効したため、確認が必要です',
     judgeInvalidConfig: '許可リストまたは判定設定が不正です',
     judgeUnavailable: '判定サービスを利用できないため確認が必要です',
     insufficient: 'ALLOWの確信度が設定した閾値未満です',

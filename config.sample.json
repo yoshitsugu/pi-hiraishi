@@ -5,6 +5,7 @@
   "auth": "bearer",
   "minAllowConfidence": 0.7,
   "timeoutMs": 5000,
+  "approvalTtlMs": 3600000,
   "allowlistFile": "allowlist.json",
   "additionalInstructions": "",
   "explainBeforeAsk": true
