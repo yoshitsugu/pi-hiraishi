@@ -520,7 +520,9 @@ export function reviewScripts(call: Call, cwd: string): ScriptReview[] {
   const known = /^(?:ruby|python\d?(?:\.\d+)?|node|bash|sh|perl|php)$/.test(interpreter);
   if (argv && !known && !/^(?:\/|\.\.?\/).*\.(?:rb|py|js|mjs|cjs|sh)$/.test(argv[0]!) &&
       !(['bundle', 'env', 'command', 'timeout'].includes(interpreter) && argv.some(arg => /^(?:ruby|python\d?|node|bash|sh|perl|php)$/.test(basename(arg))))) return [];
-  if (!argv && !/\b(?:ruby|python\d?|node|bash|sh|perl|php)\s|(?:^|[;&|]\s*)(?:\/|\.\.?\/)[^\s;|&]+\.(?:rb|py|js|mjs|cjs|sh)(?:\s|$)/.test(command)) return [];
+  // Test-runner invocations are classified as ordinary tests; nearby source text is not their script argument.
+  const invocations = command.replace(/\bnode\s+--test(?=[\s"';|&]|$)/g, 'node-test');
+  if (!argv && !/\b(?:ruby|python\d?|node|bash|sh|perl|php)\s|(?:^|[;&|]\s*)(?:\/|\.\.?\/)[^\s;|&]+\.(?:rb|py|js|mjs|cjs|sh)(?:\s|$)/.test(invocations)) return [];
   const simple = known && !!argv?.[1] && !argv[1].startsWith('-');
   const candidates = simple ? [argv![1]!] : (argv ?? command.match(/(?:\/[^\s"';&|<>]+|\.\.?\/[^\s"';&|<>]+)\.(?:rb|py|js|mjs|cjs|sh)\b/g) ?? [])
     .filter(arg => /\.(?:rb|py|js|mjs|cjs|sh)$/.test(arg));

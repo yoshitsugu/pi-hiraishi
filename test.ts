@@ -917,6 +917,21 @@ test('script filenames passed to git diff, readers or deletion commands are not 
     assert.equal(reviewScripts({ ...f.call, input: { command: `bundle exec ruby ${f.script}` } }, f.cwd).length, 1);
   } finally { f.clean(); }
 });
+test('creating source then running node tests does not inspect import paths as executed scripts', async () => {
+  const { reviewScripts } = await import('./hiraishi.ts');
+  const command = "mkdir -p test && cat > test/calc.test.mjs <<'EOF'\nimport { add } from '../src/calc.mjs';\nEOF\nnode --test";
+  const call: Call = { tool: 'bash', builtin: true, input: { command } };
+  assert.deepEqual(reviewScripts(call, '/tmp'), []);
+  assert(prepare([{ text: 'fix addition and add its tests' }], call, '/tmp').state);
+  assert.equal((await judge([{ text: 'fix addition and add its tests' }], call, '/tmp', defaults, mock())).decision, 'ALLOW');
+  const reply = { ...call, input: { command: `printf '%s' '[{"reply_to":"c_new","body":"Updated src/calc.mjs and ran node --test"}]' | crit comment --json --author Pi` } };
+  assert.deepEqual(reviewScripts(reply, '/tmp'), []);
+  const f = scriptFixture('File.unlink("important.txt")');
+  try {
+    assert.equal(reviewScripts({ ...call, input: { command: `node --test && ruby ${f.script}` } }, f.cwd).length, 1);
+    assert.equal(prepare(intents, { ...call, input: { command: `node --test && ruby ${f.script}` } }, f.cwd).verdict?.decision, 'ASK');
+  } finally { f.clean(); }
+});
 test('script tool_call uses local review and does not send script text to a classifier', async () => {
   const f = scriptFixture('puts "local verification"\n');
   const handlers = new Map<string, (e: any, ctx?: any) => unknown>();
