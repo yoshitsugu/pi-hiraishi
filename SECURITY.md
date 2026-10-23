@@ -17,11 +17,13 @@ File bodies and existing file contents are never part of the decision input.
 Operations that touch credential material are confirmed locally instead, so neither the instruction nor the operation reaches the classifier for them.
 Possible sensitive data is handled by a local confirmation instead.
 Format detection has blind spots and cannot find every unknown secret value or personal data.
+Length alone is not treated as evidence of a secret: long paths, identifiers and ordinary text remain usable. Known credential formats, labeled secret values, sensitive paths and configured credential values still trigger local checks.
 For sensitive work, review the outgoing request before it is sent.
 No telemetry is added.
 Instructions inside the model input are separated and the response is validated, but prompt injection and model errors remain possible.
 An explanation written by the execution model can also be wrong.
 Additional instructions are model guidance, not a deterministic policy engine. They do not authorize individual operations or override local sensitive-data checks, script review or the confidence threshold. Explicitly allowlisted commands bypass classification and personal prompt preferences.
+Verified built-in reads of existing AGENTS.md and SKILL.md files are also preapproved locally after sensitive-data checks, without sending instructions or operations to the classifier. Both the requested and resolved filenames must name these instruction files. This default bypasses classifier-based restrictions, including natural-language prohibitions and personal preferences, as command allowlisting does. It permits reading the file, not executing or trusting its embedded instructions as user authorization.
 Ordinary reads, local edits, builds and tests default to ALLOW unless there is concrete consequential risk, a privacy concern or an explicit restriction. Uncertain relevance alone does not require confirmation. They still use classification; an unavailable classifier or missing trusted instructions requires confirmation. Saving code with execution, deletion or network logic is treated as a file modification, not execution of that logic.
 
 The classifier receives local `git check-ignore` results for recognized literal path candidates, without exclude patterns or file contents. Git is invoked without a shell, with filesystem monitoring disabled and a one-second timeout. Failures and symlink traversal leave status unknown. Ignore results are a snapshot of individual paths, not proof that all descendants are ignored, that command scope is limited to those paths, or that data is recoverable. Ignored status does not bypass sensitive-data checks or automatically approve an operation.

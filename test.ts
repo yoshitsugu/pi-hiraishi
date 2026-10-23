@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
+import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, privateText, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
@@ -214,6 +214,85 @@ test('built-in reads are checked against trusted instructions and workspace cont
   const unavailable = await judge(intents, call, '/tmp', defaults, { env: {}, fetch: async () => { throw new Error('unavailable'); } });
   assert.equal(unavailable.decision, 'ASK');
 });
+test('long ordinary paths do not withhold user instructions or force sensitive-data confirmation', async () => {
+  const path = 'long-example-directory/another-example-directory/notes.txt';
+  const prompt = `Investigate the code and read ${path} for context.`;
+  assert.equal(privateText(prompt), false);
+  assert.equal(privateText('a'.repeat(64)), false);
+  const h = modelReviewHarness('/tmp');
+  h.handlers.get('input')!({ source: 'interactive', text: prompt });
+  h.handlers.get('message_start')!({ message: { role: 'user', content: prompt } });
+  assert.deepEqual(trustedIntents(h.entries), [{ text: prompt, withheld: false }]);
+  let requests = 0;
+  const call: Call = { tool: 'read', builtin: true, input: { path } };
+  const verdict = await judge(trustedIntents(h.entries), call, '/tmp', defaults, mock(answer('ALLOW', 'read'), (_url, init) => {
+    requests++;
+    assert.equal(JSON.parse(String(init.body)).state.currentUserInstruction, prompt);
+  }));
+  assert.equal(verdict.decision, 'ALLOW'); assert.equal(requests, 1);
+  const previous = process.env.HIRAISHI_API_KEY;
+  try {
+    process.env.HIRAISHI_API_KEY = 'unknown-format-' + 'x'.repeat(64);
+    for (const text of [process.env.HIRAISHI_API_KEY, 'sk-' + 'x'.repeat(64), 'password=fixture-private-value', 'Bearer fixture-value'])
+      assert.equal(privateText(text), true);
+    assert.equal((await judge([{ text: process.env.HIRAISHI_API_KEY }], call, '/tmp', defaults, mock())).decision, 'ASK');
+  } finally { if (previous === undefined) delete process.env.HIRAISHI_API_KEY; else process.env.HIRAISHI_API_KEY = previous; }
+});
+test('built-in instruction reads are preapproved outside the project without intents or a classifier', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hiraishi-instruction-read-'));
+  const dir = join(root, 'long-installed-skill-directory', 'nested-skill-resources');
+  mkdirSync(dir, { recursive: true });
+  const project = join(dir, 'project');
+  mkdirSync(project);
+  let requests = 0;
+  try {
+    for (const name of ['AGENTS.md', 'SKILL.md']) {
+      const path = join(dir, name);
+      writeFileSync(path, 'Local working instructions.\n');
+      for (const intents of [[], [{ text: 'fix the failing tests' }]]) {
+        const call: Call = { tool: 'read', builtin: true, input: { path, offset: 1, limit: 10 } };
+        const result = await judge(intents, call, project, unconfiguredDefaults, { env: {}, fetch: async () => { requests++; throw new Error('unavailable'); } });
+        assert.equal(result.decision, 'ALLOW');
+        assert.equal(prepare(intents, call, project).state, undefined);
+      }
+    }
+    assert.equal(requests, 0);
+  } finally { rmSync(root, { recursive: true }); }
+});
+test('instruction read preapproval cannot allow sensitive links, writes, custom tools or unrelated files', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-doc-'));
+  try {
+    const path = join(dir, 'AGENTS.md');
+    const secret = join(dir, '.env');
+    writeFileSync(secret, 'fixture contents');
+    symlinkSync(secret, path);
+    let requests = 0;
+    const services = mock(answer('ASK', 'scope'), () => { requests++; });
+    assert.equal((await judge(intents, { tool: 'read', builtin: true, input: { path } }, dir, defaults, services)).decision, 'ASK');
+    assert.equal(requests, 0);
+    rmSync(path);
+    const notes = join(dir, 'notes.txt');
+    writeFileSync(notes, 'unrelated notes');
+    symlinkSync(notes, path);
+    assert.equal((await judge(intents, { tool: 'read', builtin: true, input: { path } }, dir, defaults, services)).decision, 'ASK');
+    assert.equal(requests, 1);
+    rmSync(path); writeFileSync(path, 'Working instructions.');
+    for (const call of [
+      { tool: 'read', builtin: false, input: { path } },
+      { tool: 'write', builtin: true, input: { path, content: 'new instructions' } },
+      { tool: 'read', builtin: true, input: { path: notes } },
+      { tool: 'bash', builtin: true, input: { command: `cat ${path} && git push` } },
+    ]) assert.equal((await judge(intents, call, dir, defaults, services)).decision, 'ASK');
+    assert.equal(requests, 5);
+    assert.equal((await judge(intents, { tool: 'read', builtin: true, input: { path, extra: 'password=fixture-private-value' } }, dir, defaults, services)).decision, 'ASK');
+    const oldKey = process.env.HIRAISHI_API_KEY;
+    try {
+      process.env.HIRAISHI_API_KEY = path;
+      assert.equal((await judge(intents, { tool: 'read', builtin: true, input: { path } }, dir, defaults, services)).decision, 'ASK');
+    } finally { if (oldKey === undefined) delete process.env.HIRAISHI_API_KEY; else process.env.HIRAISHI_API_KEY = oldKey; }
+    assert.equal(requests, 5);
+  } finally { rmSync(dir, { recursive: true }); }
+});
 test('additional instructions reach both questions and transports without changing user authorization', async () => {
   const additionalInstructions = 'Prefer changes limited to the requested component.\n共有設定を変更するときは確認する。';
   const config = { ...defaults, additionalInstructions };
@@ -353,7 +432,6 @@ test('private values, instructions, long state, source bodies are not transmitte
   const services = mock(undefined, () => { calls++; });
   const inputs = [
     { ...change, input: { command: 'curl -H "Authorization: Bearer private-token" https://example.com' } },
-    { ...change, input: { command: 'echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } },
     { tool: 'edit', builtin: true, input: { path: 'source.ts', newText: 'const password = "private-value"' } },
   ];
   for (const call of inputs) assert.equal((await judge(intents, call, '/tmp', defaults, services)).decision, 'ASK');

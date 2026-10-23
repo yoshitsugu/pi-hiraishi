@@ -5,6 +5,7 @@ export interface Messages {
     askDefaultRisk: string;
     riskLocalRead: string;
     allowAllowlist: string;
+    allowInstructionRead: string;
     riskAllowlist: string;
     askSensitive: string;
     riskSensitive: string;
@@ -124,6 +125,7 @@ const en: Messages = {
     askDefaultRisk: 'It is not yet confirmed what changes and whether it can be undone',
     riskLocalRead: 'reads local information',
     allowAllowlist: 'matches the allowlist of approved commands',
+    allowInstructionRead: 'reads an agent instruction or skill definition file',
     riskAllowlist: 'runs a command approved in the settings',
     askSensitive: 'sensitive data stays local instead of being sent to the classifier',
     riskSensitive: 'possible read, change or transfer of sensitive data',
@@ -147,7 +149,7 @@ const en: Messages = {
     external: 'external service change without explicit instruction',
     destructive: 'consequential change without sufficient authorization',
     sensitive: 'check of sensitive data or authority scope',
-    scope: 'an explicit restriction excludes the operation, or unrelated private data is accessed',
+    scope: 'an explicit restriction excludes the operation, or the read is clearly unrelated to the work',
     uncertain: 'consequential effects cannot be determined safely',
     improper: 'credential export outside its purpose or clear privilege abuse',
   },
@@ -267,6 +269,7 @@ const ja: Messages = {
     askDefaultRisk: '何が変わるか、元に戻せるかはまだ確認できません',
     riskLocalRead: 'ローカル情報の読み取り',
     allowAllowlist: '許可リストのコマンドに一致',
+    allowInstructionRead: 'エージェント指示・Skill定義ファイルの読み取り',
     riskAllowlist: '設定で承認したコマンドの実行',
     askSensitive: '機密情報は判定サービスへ送らずローカルで確認します',
     riskSensitive: '機密情報の読み取り・変更・送信の可能性',
@@ -290,7 +293,7 @@ const ja: Messages = {
     external: '明示的指示のない外部サービスの変更',
     destructive: '十分な許可がない重大な変更',
     sensitive: '機密情報・権限の利用範囲の確認',
-    scope: '明示的な制限に反する操作、または無関係な私的データへのアクセス',
+    scope: '明示的な制限に反する操作、または作業と明らかに無関係な読み取り',
     uncertain: '重大な副作用の影響範囲を確定できません',
     improper: '認証情報の目的外送信または明確な権限逸脱',
   },
