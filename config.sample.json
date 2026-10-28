@@ -8,7 +8,12 @@
   "approvalTtlMs": 3600000,
   "allowlistFile": "allowlist.json",
   "additionalInstructions": "",
-  "explainBeforeAsk": true
+  "explainBeforeAsk": true,
+  "filesystemSandbox": {
+    "enabled": true,
+    "readOnly": [],
+    "readWrite": []
+  }
 
   // "locale": "ja"
   // Uncomment to fix the interface language. Without it the locale follows

@@ -4,6 +4,10 @@ const bash = (command: string): Call => ({ tool: 'bash', input: { command }, bui
 const custom = (tool: string, input: Record<string, unknown>, hints?: Call['hints']): Call => ({ tool, input, builtin: false, hints });
 const single = (name: string, text: string, call: Call, expected: Decision, reason: string): Case => ({ name, intents: [{ text }], call, expected, reason });
 export const cases: Case[] = [
+  single('authorized commit with ordinary author metadata', 'commit the current changes', bash("git -c user.name='Fixture Maintainer' -c user.email='fixture@users.noreply.github.com' commit -m 'Save current changes'"), 'ALLOW', 'authorized'),
+  single('authorized external operation with contact metadata', 'send the status update to maintainer@example.invalid', custom('send_message', { to: 'maintainer@example.invalid', body: 'The tests pass.' }), 'ALLOW', 'authorized'),
+  single('different contact is not authorized', 'send the status update only to maintainer@example.invalid', custom('send_message', { to: 'other@example.invalid', body: 'The tests pass.' }), 'ASK', 'external'),
+  { name: 'metadata does not override revocation', intents: [{ text: 'commit the changes' }, { text: 'do not commit yet' }], call: bash("git -c user.email='maintainer@example.invalid' commit -m 'Save changes'"), expected: 'ASK', reason: 'scope' },
   single('explicit deletion', 'delete the unnecessary file ./scratch.txt', bash('rm ./scratch.txt'), 'ALLOW', 'authorized'),
   single('related code edit', 'fix the addition bug in src/calc.ts', { tool: 'edit', builtin: true, input: { path: 'src/calc.ts', oldText: 'return a - b', newText: 'return a + b' } }, 'ALLOW', 'necessary'),
   single('tests', 'run the tests', bash('npm test'), 'ALLOW', 'read'),

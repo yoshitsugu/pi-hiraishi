@@ -4,7 +4,7 @@ A pi extension that checks tool calls against your instructions before they run.
 
 ## Requirements
 
-pi 1.3.x and Node.js 22.19 or later. Tested on Linux; macOS and Windows are unverified. Optional script isolation uses an executor you configure for the target project; install its runtimes and dependencies in that environment.
+pi 1.3.x, Node.js 22.19 or later, and Linux with bubblewrap. The default filesystem sandbox requires `--bind-fd`, `--ro-bind-fd` and `--disable-userns` support; tested with bubblewrap 0.13.1. Missing or unsupported isolation blocks execution. macOS and Windows have no filesystem backend. Optional script isolation additionally uses an executor you configure for the target project.
 
 ## Install
 
@@ -46,13 +46,52 @@ The default `minAllowConfidence` is `0.7`. An explicit value in your personal co
 
 Restart pi or run `/reload`, then send your next instruction. Personal settings are separate from the installed package. `HIRAISHI_CONFIG` can point to another config file; a custom pi agent directory also changes the default settings location.
 
+## Default filesystem sandbox
+
+Hiraishi enables a Linux bubblewrap boundary by default. No new personal setting is needed. Restart pi or use `/reload` after updating the extension. This is separate from the optional reviewed-script executor named `sandbox`.
+
+| Location | Default access inside tools |
+|---|---|
+| Session working directory | Read, write and delete |
+| Host `/tmp` | Read, write and delete |
+| Current Pi agent directory, `~/.pi/agent`, `~/.pi/agents`, `~/.pi/shared` | Read only, when present |
+| `~/.agents/skills` | Read only, when present |
+| System executables/libraries, required resolver/CA files, current Node binary directory | Read only |
+| Other host paths | Hidden unless explicitly added |
+
+The working directory is the project boundary; Hiraishi does not infer the Git root. HOME itself, its parents and system runtime trees cannot be writable project roots. Existing Pi authentication files are masked. Pi configuration, Hiraishi runtime files, bubblewrap/Node executables and existing project Git hooks/config are protected from tool writes, including through writable ancestor directories. Other project files, including `.env`, remain accessible: this initial boundary does not identify secrets inside allowed directories. `/tmp` is the real shared host directory, so other temporary files and sockets are accessible too.
+
+Merge optional directory grants into your existing Hiraishi configuration:
+
+```json
+{
+  "filesystemSandbox": {
+    "enabled": true,
+    "readOnly": ["~/src/shared-library", "~/toolchains/ruby"],
+    "readWrite": ["~/.cache/my-project"]
+  }
+}
+```
+
+Entries must name existing directories using absolute paths or `~/...`; globs and relative paths are rejected. More specific mounts govern their subtrees; read-only wins for identical configured paths, and protected settings/runtime paths stay read-only. The normal `~/.pi/agent/hiraishi/config.json` is outside the writable project. A custom configuration must also stay outside all writable roots, including `/tmp`, even when reached through a symlink.
+
+Sandbox settings are captured when the extension loads. Adding permissions or disabling the boundary requires a trusted configuration edit followed by restart or `/reload`. Hiraishi approval never widens these permissions. Changed directory identities or symlink targets require reload; mount sources are pinned and passed to bubblewrap as file descriptors to avoid path substitution at launch.
+
+`read`, `write`, `edit` and `bash` all use the same OS boundary, including operations executed by `hiraishi_review` after approval. Hiraishi still treats these verified adapters as its own built-in operations for body omission, allowlisting and script inspection. `!` / `!!` also use confined shell operations, although they do not receive Hiraishi intent classification. An unadapted custom tool or another extension's replacement is refused while the boundary is enabled; use the guarded tools instead. Other extensions' internal code and `pi.exec` remain trusted host code and are outside this boundary.
+
+Commands use a fresh environment with a filtered PATH, HOME, TMPDIR and fixed locale/terminal values; provider credentials, shell startup files, `BASH_ENV`, `NODE_OPTIONS` and other parent variables are not inherited. The shell is `/bin/bash --noprofile --norc`. Child processes share the filesystem, PID, IPC and UTS isolation. Mount-source descriptors are closed by bubblewrap before the command runs. Network access remains enabled for development; this feature does not restrict remote service writes or impose CPU/memory/disk quotas.
+
+If a build needs another runtime, cache, Git worktree metadata directory or skill dependency, add the required directories explicitly. Loading a skill does not permit its scripts to exceed the boundary. Secrets needed by development commands require a separate explicit design; this version has no environment-variable forwarding option. File-tool operations have a 32 MiB per-file limit. Missing bubblewrap, invalid policy, initialization failure, timeout and cancellation never retry outside the boundary.
+
+The trusted code files are read-only even when developing Hiraishi's own checkout; use a separate installed copy when editing those files with Pi. To deliberately run without this boundary, set `filesystemSandbox.enabled` to `false` in trusted configuration and reload; Hiraishi's soft policy still applies. This setting is not an approval fallback.
+
 ## Reusing human approvals
 
 Hiraishi remembers human-approved operation summaries in memory for the current session. On subsequent classified operations, the model compares the proposed action with unexpired approvals and can ALLOW an operation with equivalent or lower risk. Arguments need not match exactly, but targets, destinations, scope, data exposure and side effects must remain within the approved risk. Later user prohibitions and revocations still apply. This is a model judgment, not a deterministic equivalence check; classifier failure or an uncertain answer requires confirmation.
 
 Set `"approvalTtlMs": 3600000` in your personal config to control the lifetime in milliseconds; one hour is the default and `0` disables reuse. A confident ALLOW that names an equivalent approval updates only that entry's timestamp. The original operation summary stays unchanged and no new entry is added, so a chain of progressively broader operations is always compared with the original human approval. A normal classifier ALLOW without a matching approval does not create or refresh history.
 
-Expired entries are removed before classification. History is limited to 16 entries and 12,000 serialized UTF-8 bytes per request; oversized summaries are not retained. Entries contain the same operation summaries used for classification, without file bodies or script source. Session changes, forks, tree navigation, reloads and configuration changes clear the history. Ordinary new user messages keep history and are included in the next classification so that restrictions can override prior approval. No history is saved to disk.
+Expired entries are removed before classification. History is limited to 16 entries and 12,000 serialized UTF-8 bytes per request; oversized summaries are not retained. Entries contain local operation summaries without file bodies or script source; email metadata is redacted when summaries are sent for classification. Session changes, forks, tree navigation, reloads and configuration changes clear the history. Ordinary new user messages keep history and are included in the next classification so that restrictions can override prior approval. No history is saved to disk.
 
 Sensitive operations and unreadable or hidden scripts continue to require local confirmation and are not retained. A script with recognized side effects can use equivalence classification only when a human-approved script's hash and resolved path still match; changed source requires confirmation. Choosing configured isolation does not grant reusable permission to run the original script normally.
 
@@ -124,6 +163,8 @@ Missing configuration, API failures, or uncertain decisions require confirmation
 
 Set `explainBeforeAsk` to `false` for direct confirmation without an explanation from the execution model.
 
+Email addresses in instructions, operation fields, approval history and personal preferences are replaced with stable opaque aliases before either classifier transport receives them. Matching addresses retain matching aliases, and different addresses remain distinct, so destination restrictions and approval scope can still be compared. The aliases use a process-local secret key; the classifier receives no address-to-alias lookup. Original arguments remain unchanged for execution and local confirmation. Ordinary contact/author metadata alone does not require confirmation; sending messages or publishing still requires authorization. Keys, tokens, passwords and sensitive paths retain local confirmation, including when a credential happens to look like an email address. This is email redaction, not a general detector for all personal information.
+
 Your instructions and operation details may be sent to the configured classifier. Hiraishi can make mistakes and does not cover every execution path. See [security limitations](./SECURITY.md).
 
 ## Optional script isolation
@@ -169,7 +210,7 @@ npm run typecheck
 npm test
 ```
 
-Tests mock the classifier API and exercise the executor protocol with Node.js fixtures. The full suite also requires Linux, git, curl and bash; Ruby, Python and bubblewrap are not test dependencies. Isolation guarantees must be tested in the environment that provides your executor.
+Tests mock the classifier API and exercise the executor protocol with Node.js fixtures. The full suite also requires Linux, git, curl and bash. Filesystem integration tests use real bubblewrap when available; set `HIRAISHI_REQUIRE_BWRAP=1 npm test` to require them rather than skip when the backend cannot run. They use synthetic files and a test-owned process, and include the actual Pi SDK approval path with deterministic classification and UI responses. Ruby and Python are not test dependencies. Optional executor isolation guarantees still depend on the environment that provides that executor.
 
 To compare classifiers, copy `evaluation.sample.json` to `evaluation.json` and configure your candidates. Live API calls happen only with `--live`:
 

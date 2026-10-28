@@ -1,7 +1,7 @@
 # Security limitations
 
 Hiraishi checks operations before they run to reduce unintended side effects.
-It does not fully analyze arbitrary code and does not isolate pi itself.
+It does not fully analyze arbitrary code. A default Linux bubblewrap boundary confines registered file/shell tools and user shell commands; it does not isolate the Pi host process or trusted extension code.
 
 ## Trusted inputs
 
@@ -16,6 +16,7 @@ The request sends the required user instructions, the working directory, the ope
 File bodies and existing file contents are never part of the decision input.
 Operations that touch credential material are confirmed locally instead, so neither the instruction nor the operation reaches the classifier for them.
 Possible sensitive data is handled by a local confirmation instead.
+Email addresses are ordinary metadata rather than credentials by themselves. Before native or HTTP classification, email addresses in the complete context (instructions, operation, preferences and approval history) are replaced with process-keyed opaque aliases. Equal addresses have equal aliases and distinct addresses stay distinct; no address lookup is transmitted. Original operation arguments, local approval history and human-facing explanations retain their local values. This does not authorize communication, impersonation or other external writes, and it does not recognize every form of personal information. Resolved classifier credentials are checked against the original, unredacted context, so an email-shaped credential cannot be hidden from that check by redaction.
 Format detection has blind spots and cannot find every unknown secret value or personal data.
 Length alone is not treated as evidence of a secret: long paths, identifiers and ordinary text remain usable. Known credential formats, labeled secret values, sensitive paths and configured credential values still trigger local checks.
 For sensitive work, review the outgoing request before it is sent.
@@ -44,9 +45,21 @@ State comparison and execution are not atomic, so a race between the final compa
 ## Not observed
 
 Operations that do not pass through `tool_call` cannot be observed.
-That includes the user's `!` / `!!`, processes started inside extensions, communication, file operations and existing background jobs.
+That includes the user's `!` / `!!`, processes started inside extensions, communication, file operations and existing background jobs. User shell commands are confined by the filesystem sandbox but do not pass Hiraishi intent classification.
 Steps inside a tool stay invisible unless they are exposed as a new tool call.
 Nested `tool_call` events raised by `ctx.executeTool()` are observed.
+
+## Default filesystem boundary
+
+The filesystem sandbox is enabled unless trusted configuration explicitly sets `filesystemSandbox.enabled:false`. It replaces read/write/edit/bash with verified SDK adapters backed by bubblewrap, and blocks unadapted model-callable tools. Deferred approvals re-enter the same guarded tools. Tool names alone never establish adapter identity. Invalid settings do not restore native implementations.
+
+The Linux backend uses mount, user, PID, IPC and UTS namespaces, drops capabilities, disables further user namespaces, avoids shell startup files and filters the execution environment. Mount sources are identity-checked, opened without following a final symlink, and passed as file descriptors. A changed source causes refusal, not automatic permission expansion. The extension captures sandbox configuration at load, so approval reuse and later soft-policy config edits cannot expand the active OS boundary. Bubblewrap failure has no unconfined fallback.
+
+The project and **the real shared host `/tmp` are writable**, including deletion. This permits damage to allowed project files and other same-user temporary data. Network remains enabled, including localhost services. There are no CPU, memory, PID-count or disk quotas. Environment credentials are omitted, and known Pi auth files are masked, but other secrets inside readable projects, Pi settings, skills or temporary files may still be read. It is not a content-based secret filter or an external-service authorization boundary. Existing hard links or shared writable aliases can also connect assets that appear at different paths; only grant directories whose contents you intend tools to access.
+
+Pi itself, extension initialization/hooks, `pi.exec`, classifier/inspection host reads, and the Node SDK run outside the boundary. Extensions are trusted and can perform host operations without going through these tools. Another extension can also change event handling; this is not a defense against malicious code inside the same process. Provider access and initial resource/skill discovery happen in the host process. A separate user/container around Pi is needed to confine those paths too.
+
+Read-only runtime/configuration mounts also anchor writable ancestors to prevent replacing protected host paths by renaming a parent. Sandbox configuration must reside outside writable roots. Policy paths and grants must be managed by the human. Kernel vulnerabilities, all namespace edge cases, and arbitrary existing hard-link layouts are not covered by the integration tests. See README for exact allowed locations and operational restrictions.
 
 ## Configured isolation executor
 

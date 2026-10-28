@@ -4,9 +4,16 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, privateText, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
+import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, privateText, redactMetadata, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+
+function mockToolInventory(pi: ExtensionAPI): ExtensionAPI {
+  const tools = new Map<string, any>();
+  return { ...pi, registerTool: tool => { tools.set(tool.name, tool); pi.registerTool(tool); },
+    getAllTools: () => [...tools.values()].map(tool => ({ ...tool, sourceInfo: { source: 'cli', path: 'hiraishi-test-extension' } })),
+  };
+}
 
 const defaults: Config = { ...unconfiguredDefaults, endpoint: 'https://classifier.example.invalid/v1/systemone', model: 'fixture-model', registryProvider: 'fixture-classifier' };
 const evaluationModels: Config[] = ['candidate-a', 'candidate-b', 'candidate-c'].map(model => ({ ...defaults, model }));
@@ -190,9 +197,9 @@ for (const c of cases) test(`offline policy plumbing: ${c.name}`, async () => {
   const result = await judge(c.intents, c.call, '/tmp', defaults, mock(answer(c.expected, c.reason), (_url, init) => {
     count++;
     const payload = JSON.parse(String(init.body));
-    assert.deepEqual(payload.questions, questions);
-    assert.equal(payload.state.currentUserInstruction, c.intents.at(-1)!.text);
-    assert.deepEqual(payload.state.priorUserInstructions, c.intents.slice(0, -1).map(i => i.text));
+    assert.deepEqual(payload.questions, redactMetadata(questions));
+    assert.equal(payload.state.currentUserInstruction, redactMetadata(c.intents.at(-1)!.text));
+    assert.deepEqual(payload.state.priorUserInstructions, redactMetadata(c.intents.slice(0, -1).map(i => i.text)));
     assert.doesNotMatch(String(init.body), /fixture-key/);
   }));
   assert.equal(result.decision, c.expected);
@@ -494,7 +501,7 @@ test('input provenance, queue activation, branch entries and transformed input',
     registerTool: () => {}, on: (name: string, h: (e: any) => unknown) => { handlers.set(name, h); },
     appendEntry: (customType: string, data: unknown) => { entries.push({ type: 'custom', customType, data }); },
   } as unknown as ExtensionAPI;
-  extension(pi);
+  extension(mockToolInventory(pi));
   const emit = (name: string, e: unknown) => handlers.get(name)!(e);
   emit('input', { text: 'push it', source: 'interactive', streamingBehavior: 'followUp' });
   assert.equal(entries.length, 0);
@@ -693,7 +700,7 @@ test('tool_call handler normalizes allowlisted git diff before execution', async
   writeFileSync(join(testConfigRoot, 'diff-allowlist.json'), JSON.stringify({ commands: [['git', 'diff']] }));
   process.env.HIRAISHI_CONFIG = fixture;
   try {
-    extension(pi);
+    extension(mockToolInventory(pi));
     const event = { toolName: 'bash', input: { command: 'git diff --stat' } };
     const ctx = { cwd: '/tmp', hasUI: false, signal: undefined, sessionManager: { getBranch: () => [] } };
     assert.equal(await handlers.get('tool_call')!(event, ctx), undefined);
@@ -940,7 +947,7 @@ test('script tool_call uses local review and does not send script text to a clas
     getAllTools: () => [{ name: 'bash', sourceInfo: { source: 'builtin', path: 'builtin:bash' } }],
   } as unknown as ExtensionAPI;
   try {
-    extension(pi);
+    extension(mockToolInventory(pi));
     const event = { toolName: 'bash', input: f.call.input };
     const ctx = { cwd: f.cwd, hasUI: true, sessionManager: { getBranch: () => [] },
       modelRegistry: { getApiKeyForProvider: async () => { requests++; throw new Error('should not classify'); } },
@@ -963,6 +970,7 @@ test('autoload entry re-export resolves helper imports and helper execution path
   copyFileSync(join(source, 'hiraishi.ts'), join(real, 'hiraishi.ts'));
   copyFileSync(join(source, 'messages.ts'), join(real, 'messages.ts'));
   copyFileSync(join(source, 'sandbox-runner.ts'), join(real, 'sandbox-runner.ts'));
+  copyFileSync(join(source, 'filesystem-sandbox.ts'), join(real, 'filesystem-sandbox.ts'));
   const entry = join(extensions, 'hiraishi.ts');
   writeFileSync(entry, 'export { default } from "../../hiraishi/hiraishi.ts";\n');
   const script = join(root, 'verify.rb'); writeFileSync(script, 'check = 1\nputs check\n');
@@ -979,9 +987,9 @@ test('autoload entry re-export resolves helper imports and helper execution path
     const jiti = createJiti(pathToFileURL(entry).href, { moduleCache: false, tryNative: false, virtualModules: VIRTUAL_MODULES });
     const factory = await jiti.import(entry, { default: true });
     const handlers = new Map<string, (e: any, ctx?: any) => unknown>();
-    factory({ registerTool: () => {}, on: (name: string, h: (e: any) => unknown) => handlers.set(name, h),
+    factory(mockToolInventory({ registerTool: () => {}, on: (name: string, h: (e: any) => unknown) => handlers.set(name, h),
       getAllTools: () => [{ name: 'bash', sourceInfo: { source: 'builtin', path: 'builtin:bash' } }],
-    });
+    } as unknown as ExtensionAPI));
     const event = { toolName: 'bash', input: { command: `/usr/bin/ruby ${script}` } };
     const result = await handlers.get('tool_call')!(event, { cwd: project, hasUI: true, ui: { select: async () => 'Run with configured sandbox' }, sessionManager: { getBranch: () => [] } });
     assert.equal(result, undefined);
@@ -1004,11 +1012,11 @@ function modelReviewHarness(cwd: string, choice: string | undefined = 'Allow thi
   const ctx: any = { cwd, hasUI, signal: undefined, sessionManager: { getBranch: () => entries },
     ui: { select: async (text: string) => { messages.push(text); return choice; }, confirm: async (_title: string, text: string) => { messages.push(text); return choice !== undefined && choice !== 'Reject'; } },
   };
-  extension({
+  extension(mockToolInventory({
     on: (name: string, handler: any) => handlers.set(name, handler), registerTool: (tool: any) => tools.set(tool.name, tool),
     getAllTools: () => ['write','edit','bash','read'].map(name => ({ name, sourceInfo: { source: 'builtin', path: `builtin:${name}` } })),
     appendEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
-  } as unknown as ExtensionAPI);
+  } as unknown as ExtensionAPI));
   const attempt = (name: string, input: Record<string, unknown>, parentToolCallId?: string) => handlers.get('tool_call')!({ toolName: name, input: structuredClone(input), toolCallId: 'operation', parentToolCallId }, ctx);
   ctx.executeTool = async (name: string, input: Record<string, unknown>) => {
     modifyNested?.(input);
@@ -1775,4 +1783,94 @@ test('routine scripts use classification without automatic confirmation and pres
       }
     }
   } finally { writeFileSync(configPath, savedConfig); f.clean(); }
+});
+
+test('contact metadata is redacted consistently without changing execution data or collapsing different destinations', async () => {
+  const first = 'maintainer@example.invalid'; const second = 'other@example.invalid';
+  const input = { text: `first: ${first}\n${first}`, quoted: `"${first}"`, [first]: second, path: `./${first}/notes.txt` };
+  const masked = redactMetadata(input);
+  assert.equal(JSON.stringify(masked).includes(first), false);
+  assert.equal(JSON.stringify(masked).includes(second), false);
+  assert.deepEqual(masked, redactMetadata(input));
+  const alias = redactMetadata(first);
+  assert.notEqual(alias, redactMetadata(second));
+  assert.equal(masked.text, `first: ${alias}\n${alias}`);
+  assert.equal(masked.quoted, `"${alias}"`);
+  assert.equal(masked.path, `./${alias}/notes.txt`);
+  assert.equal(input.text, `first: ${first}\n${first}`);
+  assert.equal(privateText(first), false);
+  const call: Call = { tool: 'send_message', builtin: false, input: { to: second, body: 'Status update' } };
+  let requests = 0;
+  const result = await judge([{ text: `Send the update only to ${first}` }], call, '/tmp', defaults, mock(answer('ASK', 'external'), (_url, init) => {
+    requests++;
+    const context = JSON.parse(String(init.body));
+    assert(context.state.currentUserInstruction.includes(alias));
+    assert.equal(context.state.operation.input.to, redactMetadata(second));
+    assert.doesNotMatch(String(init.body), /maintainer@example\.invalid|other@example\.invalid/);
+  }));
+  assert.equal(result.decision, 'ASK'); assert.equal(requests, 1);
+  assert.equal(call.input.to, second);
+});
+
+test('native and HTTP classification redact instructions, operation, preferences and prior approvals', async () => {
+  const email = 'maintainer@example.invalid'; const alias = redactMetadata(email);
+  const operation: Call = { tool: 'bash', builtin: true, input: { command: `git -c user.email='${email}' commit -m 'Save changes'` } };
+  const instructions = [{ text: `Commit using the existing ${email} identity` }];
+  const prepared = prepare(instructions, operation, '/tmp');
+  assert.equal(prepared.verdict, undefined);
+  const approval: HumanApproval = { id: 'approval_metadata', approvedAt: Date.now(), userInstructionCount: 1, operation: structuredClone(prepared.state!.operation) };
+  prepared.state!.priorApprovals = [approval];
+  const config = { ...defaults, additionalInstructions: `Prefer existing ${email} project identity` };
+  for (const native of [false, true]) {
+    let requests = 0;
+    const inspect = (context: any) => {
+      requests++;
+      assert.equal(JSON.stringify(context).includes(email), false);
+      assert(context.state.currentUserInstruction.includes(alias));
+      assert(context.state.operation.input.command.includes(alias));
+      assert(context.state.priorApprovals[0].operation.input.command.includes(alias));
+      assert(context.questions.decision.instructions.includes(alias));
+    };
+    const services = native ? { registry: reviewRegistry(state => { inspect({ state, questions: classificationQuestions(config, [approval]) }); return approvalAnswer([approval]); }) } : mock(approvalAnswer([approval]), (_url, init) => inspect(JSON.parse(String(init.body))));
+    if (native) {
+      (services.registry as any).classify = async (_model: unknown, context: any) => { inspect(context); return approvalAnswer([approval]); };
+    }
+    assert.equal((await classify(prepared.state!, config, services)).decision, 'ALLOW');
+    assert.equal(requests, 1);
+  }
+  assert.equal(prepared.state!.currentUserInstruction, instructions[0]!.text);
+  assert.equal(prepared.state!.operation.input.command, operation.input.command);
+});
+
+test('redaction never turns credentials into ordinary metadata or bypasses local confirmation', async () => {
+  const saved = process.env.HIRAISHI_API_KEY;
+  try {
+    process.env.HIRAISHI_API_KEY = 'credential@example.invalid';
+    for (const text of ['password=fixture@example.invalid', 'Bearer fixture@example.invalid', 'https://name:pass@example.invalid/private', process.env.HIRAISHI_API_KEY]) {
+      assert.equal(privateText(text), true);
+      let calls = 0;
+      const result = await judge([{ text: 'perform the requested operation' }], { tool: 'bash', builtin: true, input: { command: `printf '%s' '${text}'` } }, '/tmp', defaults, mock(answer(), () => { calls++; }));
+      assert.equal(result.decision, 'ASK'); assert.equal(calls, 0);
+    }
+    const original = { ...state, currentUserInstruction: process.env.HIRAISHI_API_KEY };
+    let calls = 0;
+    const registry = reviewRegistry(() => { calls++; return answer(); });
+    (registry as any).getApiKeyForProvider = async () => process.env.HIRAISHI_API_KEY;
+    await assert.rejects(classify(original, defaults, { registry, env: {} }));
+    assert.equal(calls, 0);
+  } finally { if (saved === undefined) delete process.env.HIRAISHI_API_KEY; else process.env.HIRAISHI_API_KEY = saved; }
+});
+
+test('review explanations may contain contact metadata while secrets still require removal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hiraishi-review-metadata-'));
+  try {
+    const h = modelReviewHarness(dir);
+    const request = JSON.parse((await h.attempt('write', { path: join(dir, 'file.txt'), content: 'fixture' })).reason);
+    const rejected = await h.explain(request.requestId, 'password=fixture-secret-value', 'Save a local change.');
+    assert.equal(rejected.details.status, 'invalid_explanation');
+    const approved = await h.explain(request.requestId, 'Save the local contact maintainer@example.invalid.', 'The operation needs a human decision.');
+    assert.equal(approved.details.hiraishi.status, 'executed');
+    assert.equal(h.executed.length, 1);
+    assert(h.messages.some(message => message.includes('maintainer@example.invalid')));
+  } finally { rmSync(dir, { recursive: true }); }
 });
