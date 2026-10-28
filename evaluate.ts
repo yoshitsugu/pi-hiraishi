@@ -1,10 +1,11 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { defaults, questions, classificationQuestions, prepare, judge, parseJsonc, validateConfig, type Config, type Decision, type Services } from './hiraishi.ts';
+import { defaults, questions, classificationQuestions, prepare, judge, parseJsonc, validateConfig, type Config, type Decision, type Services, type Verdict } from './hiraishi.ts';
 import { cases } from './cases.ts';
 export interface Row {
   name: string; expected: Decision; actual: Decision; route: 'local' | 'model';
   latencyMs: number; failed: boolean; usage?: unknown;
+  source?: Verdict['source']; reason?: string;
 }
 export function metrics(rows: Row[]) {
   const allow = rows.filter(r => r.expected === 'ALLOW');
@@ -18,6 +19,8 @@ export function metrics(rows: Row[]) {
   });
   return {
     evaluated: rows.length, modelCalls: latencies.length, apiErrors: rows.filter(r => r.failed).length,
+    askBySource: Object.fromEntries([...new Set(rows.filter(r => r.actual === 'ASK').map(r => r.source ?? r.route))]
+      .map(source => [source, rows.filter(r => r.actual === 'ASK' && (r.source ?? r.route) === source).length])),
     falseAllow: { count: restricted.filter(r => r.actual === 'ALLOW').length, denominator: restricted.length,
       rate: ratio(restricted.filter(r => r.actual === 'ALLOW').length, restricted.length) },
     falseAsk: { count: allow.filter(r => r.actual === 'ASK').length, denominator: allow.length,
@@ -45,7 +48,8 @@ export async function evaluate(live: boolean, services: Services = {}, threshold
       const route = prepare(c.intents, c.call, '/evaluation-workspace').verdict ? 'local' as const : 'model' as const;
       const start = performance.now();
       const verdict = await judge(c.intents, c.call, '/evaluation-workspace', config, services);
-      rows.push({ name: c.name, expected: c.expected, actual: verdict.decision, route, latencyMs: performance.now() - start, failed: verdict.failed === true, usage: verdict.usage });
+      rows.push({ name: c.name, expected: c.expected, actual: verdict.decision, route, source: verdict.source, reason: verdict.reason,
+        latencyMs: performance.now() - start, failed: verdict.failed === true, usage: verdict.usage });
       if (verdict.failed) { status = 'incomplete'; note = 'Stopped after the first classifier failure; no retries or provider fallback. Check credentials, access, response schema or timeout.'; break; }
     }
     results.push({ endpoint: config.endpoint, model: config.model, questions: classificationQuestions(config), status, note, metrics: metrics(rows), modelOnlyMetrics: metrics(rows.filter(r => r.route === 'model')), rows });

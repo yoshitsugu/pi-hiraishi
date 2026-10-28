@@ -4,13 +4,13 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, privateText, redactMetadata, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
+import extension, { defaults as unconfiguredDefaults, questions, prepare, judge, classify, parseResult, enforce, validateConfig, privateText, instructionText, redactMetadata, trustedIntents, classificationQuestions, ApprovalHistory, type HumanApproval, type Call, type Config, type Decision, type Services, type State } from './hiraishi.ts';
 import { cases } from './cases.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 function mockToolInventory(pi: ExtensionAPI): ExtensionAPI {
   const tools = new Map<string, any>();
-  return { ...pi, registerTool: tool => { tools.set(tool.name, tool); pi.registerTool(tool); },
+  return { ...pi, appendEntry: pi.appendEntry ?? (() => {}), registerTool: tool => { tools.set(tool.name, tool); pi.registerTool(tool); },
     getAllTools: () => [...tools.values()].map(tool => ({ ...tool, sourceInfo: { source: 'cli', path: 'hiraishi-test-extension' } })),
   };
 }
@@ -442,8 +442,10 @@ test('private values, instructions, long state, source bodies are not transmitte
     { tool: 'edit', builtin: true, input: { path: 'source.ts', newText: 'const password = "private-value"' } },
   ];
   for (const call of inputs) assert.equal((await judge(intents, call, '/tmp', defaults, services)).decision, 'ASK');
-  assert.equal((await judge([{ text: 'use password=private-value' }], change, '/tmp', defaults, services)).decision, 'ASK');
-  assert.equal((await judge(Array.from({ length: 33 }, () => intents[0]!), change, '/tmp', defaults, services)).decision, 'ASK');
+  const sanitized = prepare([{ text: 'use password=private-value; do not reset Git work' }], change, '/tmp');
+  assert.doesNotMatch(JSON.stringify(sanitized.state), /private-value/);
+  assert.match(sanitized.state!.currentUserInstruction, /do not reset Git work/);
+  assert.equal((await judge(Array.from({ length: 257 }, () => intents[0]!), change, '/tmp', defaults, services)).decision, 'ASK');
   assert.equal(calls, 0);
   const edit: Call = { tool: 'edit', builtin: true, input: { path: 'src/a.ts', oldText: 'a + b', newText: 'a - b' } };
   const p = prepare(intents, edit, '/tmp');
@@ -936,7 +938,7 @@ test('creating source then running node tests does not inspect import paths as e
   const f = scriptFixture('File.unlink("important.txt")');
   try {
     assert.equal(reviewScripts({ ...call, input: { command: `node --test && ruby ${f.script}` } }, f.cwd).length, 1);
-    assert.equal(prepare(intents, { ...call, input: { command: `node --test && ruby ${f.script}` } }, f.cwd).verdict?.decision, 'ASK');
+    assert(prepare(intents, { ...call, input: { command: `node --test && ruby ${f.script}` } }, f.cwd).state);
   } finally { f.clean(); }
 });
 test('script tool_call uses local review and does not send script text to a classifier', async () => {
@@ -1002,7 +1004,7 @@ test('autoload entry re-export resolves helper imports and helper execution path
   }
 });
 
-function modelReviewHarness(cwd: string, choice: string | undefined = 'Allow this change', hasUI = true) {
+function modelReviewHarness(cwd: string, choice: string | undefined = 'Allow this change', hasUI = true, failDiagnostics = false) {
   const handlers = new Map<string, (event: any, ctx?: any) => any>();
   const tools = new Map<string, any>();
   const executed: { name: string; input: Record<string, unknown> }[] = [];
@@ -1015,7 +1017,10 @@ function modelReviewHarness(cwd: string, choice: string | undefined = 'Allow thi
   extension(mockToolInventory({
     on: (name: string, handler: any) => handlers.set(name, handler), registerTool: (tool: any) => tools.set(tool.name, tool),
     getAllTools: () => ['write','edit','bash','read'].map(name => ({ name, sourceInfo: { source: 'builtin', path: `builtin:${name}` } })),
-    appendEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
+    appendEntry: (customType: string, data: unknown) => {
+      if (failDiagnostics && customType === 'hiraishi:decision-v1') throw new Error('diagnostic storage unavailable');
+      entries.push({ type: 'custom', customType, data });
+    },
   } as unknown as ExtensionAPI));
   const attempt = (name: string, input: Record<string, unknown>, parentToolCallId?: string) => handlers.get('tool_call')!({ toolName: name, input: structuredClone(input), toolCallId: 'operation', parentToolCallId }, ctx);
   ctx.executeTool = async (name: string, input: Record<string, unknown>) => {
@@ -1152,7 +1157,7 @@ test('expiry during classification and session changes cannot grant or refresh a
     }
   } finally { Date.now = originalNow; writeFileSync(configPath, savedConfig); rmSync(dir, { recursive: true }); }
 });
-test('approved script effects can be compared without source transmission but changed source still needs review', async () => {
+test('scripts use current context and only reuse approvals for unchanged source', async () => {
   const f = scriptFixture('File.write("output.txt", "hello")\n');
   const configPath = process.env.HIRAISHI_CONFIG!;
   const savedConfig = readFileSync(configPath, 'utf8');
@@ -1164,21 +1169,22 @@ test('approved script effects can be compared without source transmission but ch
     let selectApproval = true;
     h.ctx.modelRegistry = reviewRegistry(current => {
       requests++;
+      assert(!JSON.stringify(current).includes('File.write('));
+      if (!current.priorApprovals) return answer('ASK', 'uncertain');
       assert.equal(current.priorApprovals!.length, 1);
       assert.equal(current.operation.scripts![0]!.hash, current.priorApprovals![0]!.operation.scripts![0]!.hash);
-      assert(!JSON.stringify(current).includes('File.write'));
-      return approvalAnswer(current.priorApprovals!, selectApproval ? current.priorApprovals![0]!.id : 'none');
+      return selectApproval ? approvalAnswer(current.priorApprovals!, current.priorApprovals![0]!.id) : approvalAnswer(current.priorApprovals!, 'none', 'ASK');
     });
     const request = JSON.parse((await h.attempt('bash', f.call.input)).reason);
     assert.equal((await h.explain(request.requestId)).details.hiraishi.status, 'executed');
     assert.equal(await h.attempt('bash', f.call.input), undefined);
-    assert.equal(requests, 1);
+    assert.equal(requests, 2);
     selectApproval = false;
     assert.equal(JSON.parse((await h.attempt('bash', f.call.input)).reason).status, 'ASK_REVIEW_REQUIRED');
-    assert.equal(requests, 2);
+    assert.equal(requests, 3);
     writeFileSync(f.script, 'File.write("other.txt", "changed")\n');
     assert.equal(JSON.parse((await h.attempt('bash', f.call.input)).reason).status, 'ASK_REVIEW_REQUIRED');
-    assert.equal(requests, 2);
+    assert.equal(requests, 4);
   } finally { writeFileSync(configPath, savedConfig); f.clean(); }
 });
 test('file summary presents workflow purpose and permissions without raw JSON', async () => {
@@ -1349,8 +1355,12 @@ test('configured sandbox approval executes only the rewritten stored operation o
   const saved = readFileSync(path, 'utf8');
   try {
     const sandbox = sandboxFixture(f.cwd, 'process.exit(0)');
-    writeFileSync(path, JSON.stringify({ sandbox }));
+    writeFileSync(path, JSON.stringify({ ...defaults, sandbox }));
     const h = modelReviewHarness(f.cwd, 'Run with configured sandbox');
+    h.ctx.modelRegistry = reviewRegistry(state => {
+      assert.equal(state.priorApprovals, undefined, 'isolated approval must not authorize normal execution');
+      return answer('ASK', 'uncertain');
+    });
     const request = JSON.parse((await h.attempt('bash', f.call.input)).reason);
     assert.equal(request.status, 'ASK_REVIEW_REQUIRED');
     assert.equal(h.executed.length, 0);
@@ -1359,6 +1369,7 @@ test('configured sandbox approval executes only the rewritten stored operation o
     assert.equal(h.executed.length, 1);
     assert.match(h.executed[0]!.input.command as string, /sandbox-runner.ts/);
     assert.equal((await h.explain(request.requestId)).details.status, 'missing_request');
+    assert.equal(JSON.parse((await h.attempt('bash', f.call.input)).reason).status, 'ASK_REVIEW_REQUIRED');
   } finally { writeFileSync(path, saved); f.clean(); }
 });
 test('pending script changes invalidate the explanation and approval', async () => {
@@ -1729,20 +1740,172 @@ test('saving execution, deletion and network source is judged as a save without 
   }
 });
 
-test('scripts with concrete effects or unavailable source still require local confirmation', async () => {
+test('script side effects are classified, while sensitive and unavailable source stays local', async () => {
   const f = scriptFixture();
   let requests = 0;
   try {
     for (const source of ['File.write("out.txt", "hello")', 'File.unlink("old.txt")',
       'Net::HTTP.get(URI("https://example.invalid"))', 'system("rm -rf old")',
-      'rm -rf old', 'git reset --hard', 'git push origin main', 'sudo chmod 777 /etc/example', 'api_key = "fixture-private-value"']) {
+      'rm -rf old', 'git reset --hard', 'git push origin main', 'sudo chmod 777 /etc/example']) {
       writeFileSync(f.script, source);
-      assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer(), () => { requests++; }))).decision, 'ASK', source);
+      const verdict = await judge(intents, f.call, f.cwd, defaults, mock(answer('ASK', 'uncertain'), (_url, init) => {
+        requests++;
+        assert(!String(init.body).includes(source));
+      }));
+      assert.equal(verdict.decision, 'ASK', source);
+      assert.equal(verdict.source, 'classifier');
     }
+    assert.equal(requests, 8);
+    writeFileSync(f.script, 'api_key = "fixture-private-value"');
+    assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer(), () => { requests++; }))).decision, 'ASK');
     rmSync(f.script);
     assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer(), () => { requests++; }))).decision, 'ASK');
-    assert.equal(requests, 0);
+    assert.equal(requests, 8);
   } finally { f.clean(); }
+});
+
+test('ordinary script writes, downloads and subprocesses can be allowed without a prior approval', async () => {
+  const f = scriptFixture();
+  try {
+    for (const source of ['File.write("report.txt", "generated")', 'Net::HTTP.get(URI("https://example.invalid/docs"))', 'system("npm test")']) {
+      writeFileSync(f.script, source);
+      const verdict = await judge([{ text: 'Build the project, download its dependencies and run tests.' }], f.call, f.cwd, defaults,
+        mock(answer('ALLOW', 'necessary'), (_url, init) => {
+          const state = JSON.parse(String(init.body)).state;
+          assert.equal(state.operation.scripts.length, 1);
+          assert(!String(init.body).includes(source));
+          assert.equal(state.priorApprovals, undefined);
+        }));
+      assert.equal(verdict.decision, 'ALLOW');
+      assert.equal(verdict.source, 'classifier');
+    }
+  } finally { f.clean(); }
+});
+
+test('script risk signals distinguish consequential operations without transmitting source', async () => {
+  const f = scriptFixture();
+  try {
+    for (const [source, signal] of [
+      ['git push origin main', 'remote Git publication'],
+      ['git reset --hard', 'discarding existing Git work'],
+      ['rm -rf /home/user/Documents', 'recursive deletion'],
+      ['fs.rmSync("important", { recursive: true })', 'recursive deletion'],
+      ['sudo chmod 777 /etc/example', 'privilege, permission or infrastructure change'],
+      ['requests.post("https://example.invalid/upload", data=body)', 'remote mutation or upload'],
+      ['fetch("https://example.invalid/upload", { method: "POST", body })', 'remote mutation or upload'],
+      ['curl -F file=@out.db https://example.invalid/upload', 'remote mutation or upload'],
+      ['scp out.db remote:/backup', 'remote mutation or upload'],
+    ]) {
+      writeFileSync(f.script, source!);
+      const prepared = prepare(intents, f.call, f.cwd);
+      assert.equal(prepared.verdict, undefined);
+      assert(prepared.state!.operation.scripts![0]!.riskSignals.includes(signal!));
+      assert(!JSON.stringify(prepared.state).includes(source!));
+      assert.equal((await judge(intents, f.call, f.cwd, defaults, mock(answer('ASK', 'destructive')))).decision, 'ASK');
+    }
+    writeFileSync(f.script, 'fs.mkdirSync("build", { recursive: true })');
+    assert.deepEqual(prepare(intents, f.call, f.cwd).state!.operation.scripts![0]!.riskSignals, []);
+    writeFileSync(f.script, 'fs.writeFileSync("report.txt", "PRIVATE_PAYLOAD_MARKER"); fetch("https://example.invalid/docs"); fetch("https://example.invalid/upload", { method: "POST", body: "PRIVATE_PAYLOAD_MARKER" })');
+    const state = prepare(intents, f.call, f.cwd).state!;
+    assert(state.operation.scripts![0]!.riskSignals.includes('remote mutation or upload'));
+    assert(!JSON.stringify(state).includes('PRIVATE_PAYLOAD_MARKER'));
+    assert(!JSON.stringify(state).includes('https://example.invalid'));
+    for (const source of ['fetch("https://hooks.slack.com/services/AAA/BBB/CCC")', 'fetch("https://example.invalid/x?key=abcd1234efgh")']) {
+      writeFileSync(f.script, source);
+      const context = JSON.stringify(prepare(intents, f.call, f.cwd).state);
+      assert(context);
+      assert(!context.includes('AAA/BBB/CCC'));
+      assert(!context.includes('abcd1234efgh'));
+    }
+  } finally { f.clean(); }
+});
+
+test('large file bodies are omitted before input limits while large commands stay local', async () => {
+  const body = 'generated source line\n'.repeat(2000);
+  for (const tool of ['write', 'edit']) {
+    const call: Call = { tool, builtin: true, input: { path: 'src/generated.ts', content: body, newText: body } };
+    const verdict = await judge(intents, call, '/tmp', defaults, mock(answer('ALLOW', 'necessary'), (_url, init) => {
+      assert(!String(init.body).includes(body));
+      assert.equal(JSON.parse(String(init.body)).state.operation.input.contentOmitted, true);
+    }));
+    assert.equal(verdict.decision, 'ALLOW');
+  }
+  const command: Call = { tool: 'bash', builtin: true, input: { command: 'echo ' + 'x'.repeat(13000) } };
+  assert.equal((await judge(intents, command, '/tmp', defaults, { fetch: async () => { throw new Error('must stay local'); } })).source, 'local');
+});
+
+test('redacted instructions preserve all restrictions across long histories and session capture', async () => {
+  const previous = process.env.HIRAISHI_API_KEY;
+  const credential = 'synthetic-instruction-credential';
+  process.env.HIRAISHI_API_KEY = credential;
+  try {
+    const prompt = `Use password="fixture value with spaces" and ${credential}; do not push or delete valuable data.`;
+    const h = modelReviewHarness('/tmp');
+    h.handlers.get('input')!({ source: 'interactive', text: prompt });
+    h.handlers.get('message_start')!({ message: { role: 'user', content: prompt } });
+    const captured = trustedIntents(h.entries);
+    assert.equal(captured[0]!.withheld, false);
+    assert.doesNotMatch(JSON.stringify(captured), /fixture value with spaces|synthetic-instruction-credential/);
+    assert.match(captured[0]!.text, /do not push or delete valuable data/);
+    const history = [...captured, ...Array.from({ length: 40 }, () => ({ text: 'Continue investigating local code.' }))];
+    const verdict = await judge(history, { tool: 'bash', builtin: true, input: { command: 'git push origin main' } }, '/tmp', defaults,
+      mock(answer('ASK', 'scope'), (_url, init) => {
+        assert.match(JSON.parse(String(init.body)).state.priorUserInstructions[0], /do not push/);
+        assert(!String(init.body).includes(credential));
+      }));
+    assert.equal(verdict.source, 'classifier');
+    const long = 'Investigate local code.\n'.repeat(700) + 'Never publish the results.';
+    assert.equal(instructionText(long), long);
+    assert.match(prepare([{ text: long }], change, '/tmp').state!.currentUserInstruction, /Never publish/);
+    for (const hidden of [{ text: 'legacy hidden restriction', withheld: true }, { text: 'partial -----BEGIN PRIVATE KEY-----\nunknown' }])
+      assert.equal((await judge([hidden, ...intents], change, '/tmp', defaults, mock())).source, 'local');
+  } finally { if (previous === undefined) delete process.env.HIRAISHI_API_KEY; else process.env.HIRAISHI_API_KEY = previous; }
+});
+
+test('instruction redaction refuses ambiguous short values and preserves the Bearer scheme', () => {
+  const previous = process.env.HIRAISHI_API_KEY;
+  try {
+    process.env.HIRAISHI_API_KEY = 'delete';
+    assert.equal(instructionText('Do not delete the production database.'), undefined);
+    delete process.env.HIRAISHI_API_KEY;
+    assert.equal(instructionText('Never use Bearer auth against production.'), undefined);
+    assert.equal(instructionText('Do not send Bearer synthetic-long-value to production.'), 'Do not send Bearer [x] to production.');
+    assert.equal(instructionText('Never send "Bearer synthetic-long-value"; do not publish.'), 'Never send "Bearer [x]"; do not publish.');
+    assert.equal(instructionText('Never use Bearer authentication against production.'), undefined);
+  } finally { if (previous === undefined) delete process.env.HIRAISHI_API_KEY; else process.env.HIRAISHI_API_KEY = previous; }
+});
+
+test('ASK diagnostics distinguish classifier decisions, confidence, invalid replies and transport failures', async () => {
+  assert.equal(parseResult(answer('ASK', 'scope'), defaults).source, 'classifier');
+  assert.equal(parseResult(answer('ALLOW', 'necessary', 0.5), defaults).source, 'confidence');
+  assert.equal(parseResult(answer('ALLOW', 'destructive'), defaults).source, 'contradiction');
+  assert.equal((await judge(intents, change, '/tmp', defaults, mock({}))).source, 'invalid_response');
+  assert.equal((await judge(intents, change, '/tmp', defaults, { env: { HIRAISHI_API_KEY: 'fixture-key' }, fetch: async () => { throw new Error('offline'); } })).source, 'unavailable');
+  assert.equal((await judge(intents, change, '/tmp', unconfiguredDefaults, mock())).source, 'configuration');
+  assert.equal((await judge(intents, change, '/tmp', defaults, { env: {} })).source, 'configuration');
+  assert.equal((await judge([{ text: 'Fixture key fixture-key; do not publish.' }], change, '/tmp', defaults, { registry: reviewRegistry(() => answer()), env: {} })).source, 'local');
+  const { metrics } = await import('./evaluate.ts');
+  const rows = (['classifier', 'confidence', 'invalid_response', 'unavailable'] as const).map(source => ({
+    name: source, expected: 'ALLOW' as const, actual: 'ASK' as const, route: 'model' as const, source, latencyMs: 1, failed: false,
+  }));
+  assert.deepEqual(metrics(rows).askBySource, { classifier: 1, confidence: 1, invalid_response: 1, unavailable: 1 });
+  const h = modelReviewHarness('/tmp');
+  h.ctx.modelRegistry = reviewRegistry(() => answer('ASK', 'scope'));
+  h.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'Investigate local code.' } });
+  await h.attempt('bash', { command: 'printf diagnostic' });
+  const diagnostic = h.entries.find((entry: any) => entry.customType === 'hiraishi:decision-v1') as { data: { source: string; decision: string } };
+  assert.equal(diagnostic.data.source, 'configuration');
+  assert.equal(diagnostic.data.decision, 'ASK');
+  assert.equal(JSON.stringify(diagnostic).includes('printf diagnostic'), false);
+  const path = process.env.HIRAISHI_CONFIG!;
+  const saved = readFileSync(path, 'utf8');
+  try {
+    writeFileSync(path, JSON.stringify(defaults));
+    const failing = modelReviewHarness('/tmp', 'Allow this change', true, true);
+    failing.entries.push({ type: 'custom', customType: 'hiraishi:user-v1', data: { text: 'Investigate local code.' } });
+    failing.ctx.modelRegistry = reviewRegistry(() => answer('ALLOW', 'read'));
+    assert.equal(await failing.attempt('bash', { command: 'printf diagnostic' }), undefined);
+  } finally { writeFileSync(path, saved); }
 });
 
 test('routine scripts use classification without automatic confirmation and preserve refusals and state checks', async () => {

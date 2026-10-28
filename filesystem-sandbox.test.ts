@@ -187,6 +187,10 @@ integration('real Pi SDK preserves ALLOW and ASK approval execution within the s
     assert.equal((await call('read', { path: join(project, 'sdk.txt') })).isError, false);
     assert.equal((await call('edit', { path: join(project, 'sdk.txt'), edits: [{ oldText: 'SDK_BODY_MARKER', newText: 'edited' }] })).isError, false);
     assert.equal((await call('bash', { command: 'test -f sdk.txt && printf built > sdk-build.txt', timeout: 5 })).isError, false);
+    assert.equal((await call('write', { path: join(project, 'generate.cjs'), content: 'require("node:fs").writeFileSync("generated.txt", "synthetic output")' })).isError, false);
+    assert.equal((await call('bash', { command: 'node ./generate.cjs', timeout: 5 })).isError, false);
+    assert.equal(readFileSync(join(project, 'generated.txt'), 'utf8'), 'synthetic output');
+    assert.equal(approvals, 0, 'routine script writes must use classification without mandatory approval');
     assert.equal((await call('read', { path: join(outside, 'secret') })).isError, true);
     assert.equal((await call('write', { path: join(outside, 'secret'), content: 'overwrite' })).isError, true);
     assert.equal((await call('unadapted', {})).isError, true);
