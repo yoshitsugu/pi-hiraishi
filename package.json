@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test.ts filesystem-sandbox.test.ts",
+    "test": "node --test test.ts filesystem-sandbox.test.ts subagent.test.ts",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "evaluate": "node evaluate.ts"
   },
@@ -27,6 +27,7 @@
     "hiraishi.ts",
     "messages.ts",
     "filesystem-sandbox.ts",
+    "subagent.ts",
     "sandbox-runner.ts",
     "config.sample.json",
     "allowlist.sample.json",
@@ -35,6 +36,7 @@
     "cases.ts",
     "test.ts",
     "filesystem-sandbox.test.ts",
+    "subagent.test.ts",
     "tsconfig.json",
     "README.md",
     "SECURITY.md",

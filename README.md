@@ -85,6 +85,24 @@ If a build needs another runtime, cache, Git worktree metadata directory or skil
 
 The trusted code files are read-only even when developing Hiraishi's own checkout; use a separate installed copy when editing those files with Pi. To deliberately run without this boundary, set `filesystemSandbox.enabled` to `false` in trusted configuration and reload; Hiraishi's soft policy still applies. This setting is not an approval fallback.
 
+## Pi subagents
+
+Use `hiraishi_subagent` to delegate work while the filesystem sandbox is enabled. Starting another agent CLI from `bash` is not supported by the default boundary: its installation may be hidden, Pi state is read-only, authentication files are masked and provider environment variables are omitted. The dedicated tool uses the parent's current model/provider connection in trusted host code; no extra mounts, credentials in tool arguments/environment, child configuration directory or child session file are needed.
+
+```json
+{
+  "task": "Review the uncommitted changes for correctness. Inspect relevant new files too. Do not modify files.",
+  "mode": "review",
+  "timeoutSeconds": 120
+}
+```
+
+`review` is the default. It exposes `read` plus fixed `git_diff` and `git_status` operations, and refuses writes, arbitrary shell commands, custom tools and recursive delegation. The Git tools accept `{}` only; invalid arguments return a validation error without execution, allowing the child to correct its input within the normal limits. The Git diff shows tracked unstaged and staged changes in separate sections and works without an initial commit; untracked files must be read separately. Git inspection uses the system `/usr/bin/git` through the parent's guarded `bash` tool, with optional index refresh/locking, external diff/textconv helpers and filesystem monitoring disabled. With an explicit tool allowlist, include the parent's `read`, `bash`, `hiraishi_review` and `hiraishi_subagent` tools for review; Hiraishi uses its review tool's source metadata to verify adapter ownership.
+
+Select `mode: "work"` for bounded implementation tasks; the parent's `read`, `write`, `edit` and `bash` tools must be available alongside `hiraishi_review` and `hiraishi_subagent`. Every child operation goes through `ctx.executeTool()`, the parent's actual user instructions, normal Hiraishi checks and the existing filesystem boundary. The delegated task is assistant-supplied context, not user authorization. A permission refusal or other execution failure stops the child and returns the original approval request/error to the parent; the child cannot confirm or bypass it. Sandbox file-read `ENOENT`/`ENOTDIR`/`EISDIR` errors and Git reporting that the directory is not a repository are recoverable tool results, so these inspection limitations do not end the whole review. Parent instruction/session/configuration changes prevent subsequent child operations.
+
+The child has a fresh conversation containing only its task and its own tool results. Include the context it needs in `task`; it does not inherit the parent's conversation or load additional extensions, skills or context files. Model requests use the parent model and incur its normal API usage. Runs are limited to 120 seconds by default (maximum 300), 16 model turns, 32 tool calls, 4,096 output tokens per model request and 256,000 serialized context characters. Text tool output is capped at 64,000 characters with a truncation marker; images are omitted. Cancellation, errors and limits return an explicit status and never fall back to an unguarded CLI or another provider.
+
 ## Reusing human approvals
 
 Hiraishi remembers human-approved operation summaries in memory for the current session. On subsequent classified operations, the model compares the proposed action with unexpired approvals and can ALLOW an operation with equivalent or lower risk. Arguments need not match exactly, but targets, destinations, scope, data exposure and side effects must remain within the approved risk. Later user prohibitions and revocations still apply. This is a model judgment, not a deterministic equivalence check; classifier failure or an uncertain answer requires confirmation.

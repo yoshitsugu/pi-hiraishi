@@ -221,6 +221,13 @@ test('built-in reads are checked against trusted instructions and workspace cont
   const unavailable = await judge(intents, call, '/tmp', defaults, { env: {}, fetch: async () => { throw new Error('unavailable'); } });
   assert.equal(unavailable.decision, 'ASK');
 });
+
+test('malformed verified subagent input is refused without throwing from the event handler', async () => {
+  const h = modelReviewHarness('/tmp');
+  const rejected = await h.handlers.get('tool_call')!({ toolName: 'hiraishi_subagent', input: null }, h.ctx);
+  assert.equal(rejected.block, true);
+  assert.match(rejected.reason, /Invalid Hiraishi subagent input/);
+});
 test('long ordinary paths do not withhold user instructions or force sensitive-data confirmation', async () => {
   const path = 'long-example-directory/another-example-directory/notes.txt';
   const prompt = `Investigate the code and read ${path} for context.`;
@@ -973,6 +980,7 @@ test('autoload entry re-export resolves helper imports and helper execution path
   copyFileSync(join(source, 'messages.ts'), join(real, 'messages.ts'));
   copyFileSync(join(source, 'sandbox-runner.ts'), join(real, 'sandbox-runner.ts'));
   copyFileSync(join(source, 'filesystem-sandbox.ts'), join(real, 'filesystem-sandbox.ts'));
+  copyFileSync(join(source, 'subagent.ts'), join(real, 'subagent.ts'));
   const entry = join(extensions, 'hiraishi.ts');
   writeFileSync(entry, 'export { default } from "../../hiraishi/hiraishi.ts";\n');
   const script = join(root, 'verify.rb'); writeFileSync(script, 'check = 1\nputs check\n');

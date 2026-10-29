@@ -51,6 +51,14 @@ That includes the user's `!` / `!!`, processes started inside extensions, commun
 Steps inside a tool stay invisible unless they are exposed as a new tool call.
 Nested `tool_call` events raised by `ctx.executeTool()` are observed.
 
+## Subagent delegation
+
+`hiraishi_subagent` is a verified host-side adapter, not an exemption for arbitrary custom tools. Its fresh model conversation uses the parent's model registry, so provider credentials remain in trusted host code. It creates no child auth/config/session files and does not expose parent credentials or extra host paths to filesystem tools. The parent model provider receives the delegated task and the child's text tool results, as it would receive ordinary tool results; this is not a new content-based secret filter.
+
+Review mode exposes only file reads and fixed Git inspection, with external diff/textconv helpers and filesystem monitoring disabled. Work mode exposes only the parent's guarded read/write/edit/bash tools. Every actual operation uses `ctx.executeTool()`, retaining the original trusted user instructions, permission hooks and filesystem boundary. Delegated task text and child output never become trusted user instructions or human approvals. Child review/recursive delegation/custom tools are unavailable, and a blocked operation returns to the parent instead of opening a child approval UI. The adapter's identity is checked both before classification and at execution; replacement tools are refused.
+
+Runs have time, turn, tool-call and context/output limits. Cancellation is forwarded to model requests and nested tools, but an already-completed write or remote operation cannot be undone. Parent instruction/session/configuration changes are checked before subsequent operations and after asynchronous calls; ordinary same-process race limitations still apply. Delegation does not make the classifier a deterministic authorization engine or restrict network side effects beyond the existing policy. Parent credentials, the provider runtime and trusted extensions remain outside the filesystem boundary.
+
 ## Default filesystem boundary
 
 The filesystem sandbox is enabled unless trusted configuration explicitly sets `filesystemSandbox.enabled:false`. It replaces read/write/edit/bash with verified SDK adapters backed by bubblewrap, and blocks unadapted model-callable tools. Deferred approvals re-enter the same guarded tools. Tool names alone never establish adapter identity. Invalid settings do not restore native implementations.

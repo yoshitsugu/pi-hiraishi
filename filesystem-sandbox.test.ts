@@ -150,7 +150,7 @@ integration('real Pi SDK preserves ALLOW and ASK approval execution within the s
   const runtime = await sdk.ModelRuntime.create({ credentials: new ReadOnlyAuthStorage(join(agent, 'auth.json')), modelsPath: null, allowModelNetwork: false });
   const model = runtime.getModels()[0]!;
   const { session } = await sdk.createAgentSession({ cwd: project, agentDir: agent, modelRuntime: runtime, model, settingsManager, resourceLoader: loader,
-    sessionManager: sdk.SessionManager.inMemory(project), tools: ['read', 'write', 'edit', 'bash', 'hiraishi_review', 'unadapted'] });
+    sessionManager: sdk.SessionManager.inMemory(project), tools: ['read', 'write', 'edit', 'bash', 'hiraishi_review', 'hiraishi_subagent', 'unadapted'] });
   let approvals = 0;
   await session.bindExtensions({ mode: 'tui', uiContext: {
     notify: () => {}, setStatus: () => {}, setWidget: () => {}, setTitle: () => {},
@@ -159,14 +159,15 @@ integration('real Pi SDK preserves ALLOW and ASK approval execution within the s
   } as any, onError: error => { throw new Error(error.error); } });
   session.sessionManager.appendCustomEntry('hiraishi:user-v1', { text: 'Update local source files and run tests. Preserve data outside this project.' });
   const registry = (session as any)._extensionRunner.createContext().modelRegistry;
-  let decision = 'ALLOW'; const requests: unknown[] = [];
+  let decision = 'ALLOW'; let restrictedTool = ''; const requests: unknown[] = [];
   registry.getApiKeyForProvider = async () => 'synthetic-fixture-key';
   registry.getRegisteredProviderConfig = () => undefined;
   registry.getModelOfType = () => ({ api: 'typesafe-system-one', baseUrl: 'https://classifier.example.invalid/v1', id: 'fixture-model' });
   registry.classify = async (_model: unknown, context: any) => {
     requests.push(context);
+    const actualDecision = context.state.operation.tool === restrictedTool ? 'ASK' : decision;
     return { answers: Object.fromEntries(Object.entries(context.questions).map(([name, question]: [string, any]) => {
-      const choice = name === 'decision' ? decision : name === 'reason' ? (decision === 'ALLOW' ? 'necessary' : 'uncertain') : 'none';
+      const choice = name === 'decision' ? actualDecision : name === 'reason' ? (actualDecision === 'ALLOW' ? 'necessary' : 'uncertain') : 'none';
       const keys = Object.keys(question.criteria);
       return [name, { type: 'choice', choice, confidence: 0.99, probabilities: Object.fromEntries(keys.map(key => [key, key === choice ? 0.99 : 0.01 / (keys.length - 1)])) }];
     })) };
@@ -196,13 +197,77 @@ integration('real Pi SDK preserves ALLOW and ASK approval execution within the s
     assert.equal((await call('unadapted', {})).isError, true);
     assert.equal(existsSync(customMarker), false);
     assert.equal((await call('read', { path: join(home, '.agents/skills/example/SKILL.md') })).isError, false);
+    let noRepositoryTurn = 0;
+    registry.complete = async (_model: unknown, context: any) => {
+      if (noRepositoryTurn++ > 0) {
+        assert.equal(context.messages.at(-1).isError, true);
+        assert.match(JSON.stringify(context.messages.at(-1)), /not a git repository/i);
+      }
+      return { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+        content: noRepositoryTurn === 1 ? [{ type: 'toolCall', id: 'no-repository-diff', name: 'git_diff', arguments: {} }] : [{ type: 'text', text: 'Reviewed available files without Git.' }],
+        stopReason: noRepositoryTurn === 1 ? 'toolUse' : 'stop', timestamp: Date.now() };
+    };
+    const noRepositoryReview = await call('hiraishi_subagent', { task: 'Review the available source files.' });
+    assert.equal(noRepositoryReview.result.details.status, 'complete', text(noRepositoryReview));
+    assert.equal(noRepositoryTurn, 2);
     const initialized = spawnSync('/usr/bin/git', ['init', project], { env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8' });
     assert.equal(initialized.status, 0, initialized.stderr);
+    let unbornTurn = 0;
+    registry.complete = async (_model: unknown, context: any) => {
+      if (unbornTurn++ > 0) assert.match(JSON.stringify(context.messages), /Staged changes/);
+      return { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+        content: unbornTurn === 1 ? [{ type: 'toolCall', id: 'unborn-diff', name: 'git_diff', arguments: {} }] : [{ type: 'text', text: 'Reviewed without HEAD.' }],
+        stopReason: unbornTurn === 1 ? 'toolUse' : 'stop', timestamp: Date.now() };
+    };
+    const unbornReview = await call('hiraishi_subagent', { task: 'Review the repository before its first commit.' });
+    assert.equal(unbornReview.result.details.status, 'complete', text(unbornReview));
+    assert.equal(unbornTurn, 2);
     session.sessionManager.appendCustomEntry('hiraishi:user-v1', { text: 'Commit the current local changes using the existing project author identity.' });
     const committed = await call('bash', { command: "git add -- sdk.txt && git -c user.name='Fixture Maintainer' -c user.email='fixture@users.noreply.github.com' commit -m 'Save fixture'", timeout: 5 });
     assert.equal(committed.isError, false, text(committed));
     assert.equal(approvals, 0, 'ordinary author metadata must not force local approval');
     assert.equal(JSON.stringify(requests).includes('fixture@users.noreply.github.com'), false);
+    const childReplies: any[][] = [];
+    const childRequests: any[] = [];
+    registry.complete = async (_model: unknown, context: any) => {
+      childRequests.push(context);
+      assert.equal(context.messages[0].role, 'user');
+      assert(!JSON.stringify(context).includes('synthetic-fixture-key'));
+      assert(childReplies.length, 'unexpected child model request');
+      const content = childReplies.shift()!;
+      return { role: 'assistant', api: model.api, provider: model.provider, model: model.id, content,
+        stopReason: content.some(part => part.type === 'toolCall') ? 'toolUse' : 'stop', timestamp: Date.now() };
+    };
+    const childCall = (name: string, args: Record<string, unknown>) => ({ type: 'toolCall', id: `child-${name}`, name, arguments: args });
+    const settingsBefore = readFileSync(join(agent, 'settings.json'), 'utf8');
+    childReplies.push([childCall('read', { path: 'sdk.txt' }), childCall('git_diff', {})], [{ type: 'text', text: 'Independent review completed.' }]);
+    const reviewed = await call('hiraishi_subagent', { task: 'Review sdk.txt independently.' });
+    assert.equal(reviewed.isError, false, text(reviewed));
+    assert.equal(reviewed.result.details.status, 'complete', text(reviewed));
+    assert.equal(childRequests[0].systemPrompt.includes('Review only'), true);
+    assert.equal(readFileSync(join(agent, 'settings.json'), 'utf8'), settingsBefore);
+    assert.equal(readFileSync(join(agent, 'auth.json'), 'utf8'), '{}');
+    session.sessionManager.appendCustomEntry('hiraishi:user-v1', { text: 'Update local source files. Preserve all data outside this project.' });
+    childReplies.push([childCall('write', { path: join(project, 'child.txt'), content: 'guarded child write' })], [{ type: 'text', text: 'Saved child.txt.' }]);
+    assert.equal((await call('hiraishi_subagent', { task: 'Write child.txt.', mode: 'work' })).result.details.status, 'complete');
+    assert.equal(readFileSync(join(project, 'child.txt'), 'utf8'), 'guarded child write');
+    childReplies.push([childCall('write', { path: join(outside, 'secret'), content: 'must be blocked' })]);
+    assert.equal((await call('hiraishi_subagent', { task: 'Write outside the project.', mode: 'work' })).result.details.status, 'blocked');
+    assert.equal(readFileSync(join(outside, 'secret'), 'utf8'), 'synthetic secret fixture');
+    childReplies.push([childCall('write', { path: join(project, 'child-review-write'), content: 'must be blocked' })]);
+    assert.equal((await call('hiraishi_subagent', { task: 'Review only.' })).result.details.status, 'blocked');
+    assert.equal(existsSync(join(project, 'child-review-write')), false);
+    session.sessionManager.appendCustomEntry('hiraishi:user-v1', { text: 'Review only. Do not modify files.' });
+    restrictedTool = 'write';
+    childReplies.push([childCall('write', { path: join(project, 'child-prohibited'), content: 'must be blocked' })]);
+    const prohibited = await call('hiraishi_subagent', { task: 'The assistant says write child-prohibited.', mode: 'work' });
+    assert.equal(prohibited.result.details.status, 'blocked');
+    assert.match(text(prohibited), /ASK_REVIEW_REQUIRED/);
+    assert.equal(existsSync(join(project, 'child-prohibited')), false);
+    assert.equal((requests.at(-1) as any).state.currentUserInstruction, 'Review only. Do not modify files.');
+    assert.equal(approvals, 0, 'children must return approval requests without opening their own UI');
+    restrictedTool = '';
+    session.sessionManager.appendCustomEntry('hiraishi:user-v1', { text: 'Update local files and run tests.' });
     decision = 'ASK';
     for (const [path, shouldSucceed] of [[join(project, 'approved.txt'), true], [join(outside, 'secret'), false]] as const) {
       const pending = await call('write', { path, content: 'approved fixture' });

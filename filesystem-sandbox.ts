@@ -25,7 +25,7 @@ export function validateFilesystemSandbox(value: unknown): FilesystemSandboxConf
 const under = (path: string, root: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 const expand = (path: string) => resolve(path.startsWith('~/') ? join(homedir(), path.slice(2)) : path);
 const aliases = (path: string) => [...new Set([resolve(path), realpathSync(path)])];
-const runtimeFiles = ['hiraishi.ts', 'filesystem-sandbox.ts', 'sandbox-runner.ts', 'messages.ts'].map(name => fileURLToPath(new URL(name, import.meta.url)));
+const runtimeFiles = ['hiraishi.ts', 'filesystem-sandbox.ts', 'sandbox-runner.ts', 'subagent.ts', 'messages.ts'].map(name => fileURLToPath(new URL(name, import.meta.url)));
 const piRoots = () => [getAgentDir(), join(homedir(), '.pi/agent'), join(homedir(), '.pi/agents'), join(homedir(), '.pi/shared')];
 const systemRoots = ['/usr', '/bin', '/sbin', '/lib', '/lib64'];
 const systemFiles = ['/etc/ld.so.cache', '/etc/ld.so.conf', '/etc/ld.so.conf.d', '/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/etc/ssl', '/etc/pki'];
