@@ -3,9 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test.ts filesystem-sandbox.test.ts subagent.test.ts",
-    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
-    "evaluate": "node evaluate.ts"
+    "test": "node --test policy.test.ts sandbox.test.ts extension.test.ts subagent.test.ts",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "pi": {
     "extensions": [
@@ -13,37 +12,34 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=1.4.0 <1.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.8.0"
   },
-  "description": "Hiraishi: intent-aware tool guard for pi with a configurable Jev-compatible classifier",
+  "description": "Session-scoped filesystem and HTTP permissions for pi, enforced by Anthropic Sandbox Runtime",
   "engines": {
     "node": ">=22.19.0"
   },
   "files": [
     "hiraishi.ts",
-    "messages.ts",
-    "filesystem-sandbox.ts",
+    "policy.ts",
+    "protocol.ts",
+    "runner.ts",
+    "session.ts",
+    "tools.ts",
     "subagent.ts",
-    "sandbox-runner.ts",
     "config.sample.json",
-    "allowlist.sample.json",
-    "evaluation.sample.json",
-    "evaluate.ts",
-    "cases.ts",
-    "test.ts",
-    "filesystem-sandbox.test.ts",
-    "subagent.test.ts",
-    "tsconfig.json",
     "README.md",
     "SECURITY.md",
     "LICENSE"
   ],
-  "version": "0.1.0",
+  "version": "0.2.0",
   "keywords": [
     "pi-package"
-  ]
+  ],
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81"
+  }
 }

@@ -1,10 +1,12 @@
 # pi Hiraishi
 
-A pi extension that checks tool calls against your instructions before they run. It aims to keep routine work moving while asking about unintended, consequential changes.
+Session-scoped filesystem and HTTP permissions for pi, enforced by [Anthropic Sandbox Runtime](https://github.com/anthropics/sandbox-runtime) (SRT). Ordinary reads, edits, builds and tests run without a classifier or per-operation approval. The human chooses the session's permissions.
 
 ## Requirements
 
-pi 1.3.x, Node.js 22.19 or later, and Linux with bubblewrap. The default filesystem sandbox requires `--bind-fd`, `--ro-bind-fd` and `--disable-userns` support; tested with bubblewrap 0.13.1. Missing or unsupported isolation blocks execution. macOS and Windows have no filesystem backend. Optional script isolation additionally uses an executor you configure for the target project.
+Linux x86-64 or ARM64, Node.js 22.19 or later, pi 1.4.x, bubblewrap, socat and ripgrep. User namespaces must be available. SRT is pinned to **0.0.81**; its vendored seccomp helpers must be present and executable. Unsupported platforms, invalid settings and isolation failures refuse execution. There is no unconfined fallback.
+
+Install OS prerequisites with your distribution's package manager (for example, `sudo apt install bubblewrap socat ripgrep` on Ubuntu). Ubuntu may also require its unprivileged user-namespace policy to permit bubblewrap; consult the SRT documentation.
 
 ## Install
 
@@ -12,231 +14,82 @@ pi 1.3.x, Node.js 22.19 or later, and Linux with bubblewrap. The default filesys
 pi install git:github.com/yoshitsugu/pi-hiraishi
 ```
 
-From a local checkout, use `pi install .` instead. To try it without registering a package, run `pi -e ./hiraishi.ts`.
+Install Hiraishi outside every writable workspace. Its code, dependencies, Node executable and configuration must remain outside the sandbox's writable grants. To develop this repository, use a separate installed copy, not `pi -e ./hiraishi.ts` from this writable checkout.
 
-## Configure
+## Configuration
 
-Use a trusted **Jev-compatible System One classification API**. A chat-completions endpoint alone is not sufficient.
+Save personal settings to `~/.pi/agent/hiraishi/config.json` (or the corresponding custom pi agent directory). `HIRAISHI_CONFIG` can select another absolute file path. A missing file uses the defaults below. JSON comments are supported.
 
-Create your settings directory:
+```json
+{
+  "networkMode": "off",
+  "readOnly": [],
+  "readWrite": [],
+  "denyRead": []
+}
+```
+
+The session working directory is readable and writable, including deletion. Hiraishi does not infer a Git root or create a backup. Related repositories, documentation, skills and toolchains can be added through `readOnly`; caches can be added through `readWrite`. All grants must name existing directories using literal absolute paths or `~/...`. Globs are rejected. HOME and its ancestors cannot be granted for reading or writing. System runtime directories cannot be writable roots. Grants must not overlap the session’s private SRT directory. The current and conventional pi agent directories cannot be granted as whole read roots or overlapped by write grants; grant a specific skills subdirectory instead.
+
+`denyRead` accepts literal file or directory paths, including missing paths. Use it to exclude project-specific secrets such as `.env` files. Known SSH/AWS/GnuPG and netrc locations, pi auth/models files and session histories in the current and conventional agent directories, and Hiraishi's settings are denied by default. This is path protection, not content-based secret detection: an allowed project can contain other credentials.
+
+Tools receive system runtimes, explicitly allowed paths, a fresh HOME and a session-private temporary directory. Host environment credentials and shell startup variables are not forwarded. Shared host `/tmp` contents are hidden. Node and SRT's runtime files remain read-only. Tools cannot use host Unix sockets such as Docker or SSH-agent sockets.
+
+If socat is installed outside PATH, set `"socatPath": "/absolute/path/to/socat"`. The binary must remain outside writable grants. There is no setting to weaken SRT isolation or disable the boundary.
+
+Settings are captured at session start. Changes to filesystem grants require a new session or `/reload`.
+
+## Session network modes
+
+Use the human command:
+
+```text
+/hiraishi-network
+/hiraishi-network http-get
+/hiraishi-network http-all
+/hiraishi-network off
+```
+
+| Mode | Tools may use |
+| --- | --- |
+| `off` | No external network access. This is the default. |
+| `http-get` | HTTP/HTTPS GET and HEAD to public DNS hostnames. |
+| `http-all` | All HTTP methods to public DNS hostnames, including POST, PUT and DELETE. |
+
+No per-domain approvals are required. Literal IP destinations, localhost, private/link-local and metadata addresses are refused. SSH, arbitrary TCP/UDP, external DNS connections, SOCKS, opaque CONNECT tunnels and WebSocket upgrades are not supported. Documents and dependencies that require these paths return an error; they do not acquire an exception automatically.
+
+HTTPS is terminated by SRT and inspected with its request filter. Its ephemeral CA is trusted inside tools; the private key remains outside their readable paths. Certificate-pinning and mTLS clients may fail. TLS exclusions and upstream proxies are not supported in this version.
+
+**GET-only does not prevent data disclosure or remote changes.** Data can be carried in a URL, and some services mutate state on GET. `http-all` also permits uploads and unauthenticated remote mutations. Choose a mode with those effects in mind. Network permission does not forward host credentials. The host-side model/provider connection is separate and remains available in `off` mode; readable material may be sent to that provider.
+
+Changing the mode stops running tools and downloads, closes the old runner and connections, and initializes a new runner. Calls during the transition are rejected for explicit retry, never queued or automatically replayed. Changes are serialized; stale requests/results cannot cross the runner generation. Already-completed external effects cannot be undone.
+
+A session switch, resume, fork, tree navigation or reload resets the mode to the configured default. One pi process has at most one active Hiraishi session. Shutdown takes priority over startup and mode changes. A new session waits for old cleanup to finish; failed cleanup blocks startup. If another extension cancels navigation after the before-event, tools remain unavailable until a new session or reload. An interrupted transition fails closed; reload after resolving the reported error.
+
+## Tools and delegation
+
+`read`, `write`, `edit`, `bash` and the user's `!` / `!!` commands all use the same session runner. Unadapted custom model tools are refused. A tool replacement is not trusted merely because it uses the same name.
+
+`hiraishi_subagent` uses the parent's selected model and guarded tools. Its default `review` mode exposes file reads and fixed Git diff/status operations; `work` exposes the basic tools. It shares the parent's runner and network permissions, cannot delegate recursively, and cannot approve a network change. It creates no child credential or session files. Its bounded independent conversation receives only the supplied task and its own results.
+
+File operations are limited to 32 MiB per file. Shell commands default to 120 seconds; an explicit timeout is limited to one hour. Commands, their child processes and their connections are stopped at completion or cancellation; persistent background servers are not supported.
+
+## Protect existing work
+
+Writes and deletion inside the chosen workspace affect its host files. For valuable uncommitted work, prepare an independent working copy and review the diff before manually applying it back. A Git worktree shares Git metadata and is not an isolation mechanism. Automatic copying and synchronization are outside this version.
+
+Pi itself and installed extensions run as trusted host code. This extension confines its adapted tools, not arbitrary extension internals or `pi.exec`. Only enable extensions you trust. See [SECURITY.md](SECURITY.md) for exact boundaries and limitations.
+
+## Migration from 0.1
+
+This is a breaking replacement of the Jev intent classifier. Replace the old configuration with the new schema. Legacy classifier, confidence, allowlist and reviewed-script settings are rejected instead of silently ignored. `hiraishi_review`, the classifier evaluation command and semantic approval reuse have been removed. No Jev endpoint or classifier credential is needed.
+
+## Development checks
 
 ```sh
-mkdir -p ~/.pi/agent/hiraishi
-```
-
-Save the following as `~/.pi/agent/hiraishi/config.json` with your endpoint and model:
-
-```json
-{
-  "endpoint": "https://classifier.example.invalid/v1/systemone",
-  "model": "your-classifier-model",
-  "apiKeyEnv": "HIRAISHI_API_KEY",
-  "minAllowConfidence": 0.7,
-  "timeoutMs": 5000
-}
-```
-
-Replace the example URL and model. Make your API key available in the named environment variable before starting pi; keep it out of configuration files and Git. For a server that needs no authentication, add `"auth": "none"`.
-
-The configuration and the allowlist accept `//` and `/* */` comments, so optional keys can stay in the file as a commented line. See `config.sample.json`.
-
-The interface language is English or Japanese. Add `"locale": "ja"` or `"locale": "en"` to the configuration; without it the locale follows `LC_ALL`, `LC_MESSAGES` or `LANG`. The language never changes what is decided, only how the confirmation is written.
-
-The default `minAllowConfidence` is `0.7`. An explicit value in your personal config takes precedence; change an existing `0.8` to `0.7` to use the new threshold.
-
-Restart pi or run `/reload`, then send your next instruction. Personal settings are separate from the installed package. `HIRAISHI_CONFIG` can point to another config file; a custom pi agent directory also changes the default settings location.
-
-## Default filesystem sandbox
-
-Hiraishi enables a Linux bubblewrap boundary by default. No new personal setting is needed. Restart pi or use `/reload` after updating the extension. This is separate from the optional reviewed-script executor named `sandbox`.
-
-| Location | Default access inside tools |
-|---|---|
-| Session working directory | Read, write and delete |
-| Host `/tmp` | Read, write and delete |
-| Current Pi agent directory, `~/.pi/agent`, `~/.pi/agents`, `~/.pi/shared` | Read only, when present |
-| `~/.agents/skills` | Read only, when present |
-| System executables/libraries, required resolver/CA files, current Node binary directory | Read only |
-| Other host paths | Hidden unless explicitly added |
-
-The working directory is the project boundary; Hiraishi does not infer the Git root. HOME itself, its parents and system runtime trees cannot be writable project roots. Existing Pi authentication files are masked. Pi configuration, Hiraishi runtime files, bubblewrap/Node executables and existing project Git hooks/config are protected from tool writes, including through writable ancestor directories. Other project files, including `.env`, remain accessible: this initial boundary does not identify secrets inside allowed directories. `/tmp` is the real shared host directory, so other temporary files and sockets are accessible too.
-
-Merge optional directory grants into your existing Hiraishi configuration:
-
-```json
-{
-  "filesystemSandbox": {
-    "enabled": true,
-    "readOnly": ["~/src/shared-library", "~/toolchains/ruby"],
-    "readWrite": ["~/.cache/my-project"]
-  }
-}
-```
-
-Entries must name existing directories using absolute paths or `~/...`; globs and relative paths are rejected. More specific mounts govern their subtrees; read-only wins for identical configured paths, and protected settings/runtime paths stay read-only. The normal `~/.pi/agent/hiraishi/config.json` is outside the writable project. A custom configuration must also stay outside all writable roots, including `/tmp`, even when reached through a symlink.
-
-Sandbox settings are captured when the extension loads. Adding permissions or disabling the boundary requires a trusted configuration edit followed by restart or `/reload`. Hiraishi approval never widens these permissions. Changed directory identities or symlink targets require reload; mount sources are pinned and passed to bubblewrap as file descriptors to avoid path substitution at launch.
-
-`read`, `write`, `edit` and `bash` all use the same OS boundary, including operations executed by `hiraishi_review` after approval. Hiraishi still treats these verified adapters as its own built-in operations for body omission, allowlisting and script inspection. `!` / `!!` also use confined shell operations, although they do not receive Hiraishi intent classification. An unadapted custom tool or another extension's replacement is refused while the boundary is enabled; use the guarded tools instead. Other extensions' internal code and `pi.exec` remain trusted host code and are outside this boundary.
-
-Commands use a fresh environment with a filtered PATH, HOME, TMPDIR and fixed locale/terminal values; provider credentials, shell startup files, `BASH_ENV`, `NODE_OPTIONS` and other parent variables are not inherited. The shell is `/bin/bash --noprofile --norc`. Child processes share the filesystem, PID, IPC and UTS isolation. Mount-source descriptors are closed by bubblewrap before the command runs. Network access remains enabled for development; this feature does not restrict remote service writes or impose CPU/memory/disk quotas.
-
-If a build needs another runtime, cache, Git worktree metadata directory or skill dependency, add the required directories explicitly. Loading a skill does not permit its scripts to exceed the boundary. Secrets needed by development commands require a separate explicit design; this version has no environment-variable forwarding option. File-tool operations have a 32 MiB per-file limit. Missing bubblewrap, invalid policy, initialization failure, timeout and cancellation never retry outside the boundary.
-
-The trusted code files are read-only even when developing Hiraishi's own checkout; use a separate installed copy when editing those files with Pi. To deliberately run without this boundary, set `filesystemSandbox.enabled` to `false` in trusted configuration and reload; Hiraishi's soft policy still applies. This setting is not an approval fallback.
-
-## Pi subagents
-
-Use `hiraishi_subagent` to delegate work while the filesystem sandbox is enabled. Starting another agent CLI from `bash` is not supported by the default boundary: its installation may be hidden, Pi state is read-only, authentication files are masked and provider environment variables are omitted. The dedicated tool uses the parent's current model/provider connection in trusted host code; no extra mounts, credentials in tool arguments/environment, child configuration directory or child session file are needed.
-
-```json
-{
-  "task": "Review the uncommitted changes for correctness. Inspect relevant new files too. Do not modify files.",
-  "mode": "review",
-  "timeoutSeconds": 120
-}
-```
-
-`review` is the default. It exposes `read` plus fixed `git_diff` and `git_status` operations, and refuses writes, arbitrary shell commands, custom tools and recursive delegation. The Git tools accept `{}` only; invalid arguments return a validation error without execution, allowing the child to correct its input within the normal limits. The Git diff shows tracked unstaged and staged changes in separate sections and works without an initial commit; untracked files must be read separately. Git inspection uses the system `/usr/bin/git` through the parent's guarded `bash` tool, with optional index refresh/locking, external diff/textconv helpers and filesystem monitoring disabled. With an explicit tool allowlist, include the parent's `read`, `bash`, `hiraishi_review` and `hiraishi_subagent` tools for review; Hiraishi uses its review tool's source metadata to verify adapter ownership.
-
-Select `mode: "work"` for bounded implementation tasks; the parent's `read`, `write`, `edit` and `bash` tools must be available alongside `hiraishi_review` and `hiraishi_subagent`. Every child operation goes through `ctx.executeTool()`, the parent's actual user instructions, normal Hiraishi checks and the existing filesystem boundary. The delegated task is assistant-supplied context, not user authorization. A permission refusal or other execution failure stops the child and returns the original approval request/error to the parent; the child cannot confirm or bypass it. Sandbox file-read `ENOENT`/`ENOTDIR`/`EISDIR` errors and Git reporting that the directory is not a repository are recoverable tool results, so these inspection limitations do not end the whole review. Parent instruction/session/configuration changes prevent subsequent child operations.
-
-The child has a fresh conversation containing only its task and its own tool results. Include the context it needs in `task`; it does not inherit the parent's conversation or load additional extensions, skills or context files. Model requests use the parent model and incur its normal API usage. Runs are limited to 120 seconds by default (maximum 300), 16 model turns, 32 tool calls, 4,096 output tokens per model request and 256,000 serialized context characters. Text tool output is capped at 64,000 characters with a truncation marker; images are omitted. Cancellation, errors and limits return an explicit status and never fall back to an unguarded CLI or another provider.
-
-## Reusing human approvals
-
-Hiraishi remembers human-approved operation summaries in memory for the current session. On subsequent classified operations, the model compares the proposed action with unexpired approvals and can ALLOW an operation with equivalent or lower risk. Arguments need not match exactly, but targets, destinations, scope, data exposure and side effects must remain within the approved risk. Later user prohibitions and revocations still apply. This is a model judgment, not a deterministic equivalence check; classifier failure or an uncertain answer requires confirmation.
-
-Set `"approvalTtlMs": 3600000` in your personal config to control the lifetime in milliseconds; one hour is the default and `0` disables reuse. A confident ALLOW that names an equivalent approval updates only that entry's timestamp. The original operation summary stays unchanged and no new entry is added, so a chain of progressively broader operations is always compared with the original human approval. A normal classifier ALLOW without a matching approval does not create or refresh history.
-
-Expired entries are removed before classification. History is limited to 16 entries and 12,000 serialized UTF-8 bytes per request; oversized summaries are not retained. Entries contain local operation summaries without file bodies or script source; email metadata is redacted when summaries are sent for classification. Session changes, forks, tree navigation, reloads and configuration changes clear the history. Ordinary new user messages keep history and are included in the next classification so that restrictions can override prior approval. No history is saved to disk.
-
-Sensitive operations and unreadable or hidden scripts continue to require local confirmation and are not retained. Script side effects use normal contextual classification without requiring a prior human approval. Reusing a script approval requires its hash and resolved path to match; changed source receives a fresh classification. Choosing configured isolation does not grant reusable permission to run the original script normally.
-
-## Personal decision preferences
-
-Add `additionalInstructions` to your personal `config.json` to refine the classifier's scope and confirmation preferences:
-
-```json
-{
-  "additionalInstructions": "Ask before changing deployment settings or adding dependencies. Treat the sibling shared-library directory as relevant when investigating build failures."
-}
-```
-
-Merge this field into your endpoint and model settings. It accepts up to 8000 characters and can be written in the language understood by your classifier. Empty or omitted text uses the default policy. The text is appended to both classification questions as trusted configuration, separately from the current and prior user instructions. It is sent to the configured classifier, so do not include credentials or private data. If sensitive text is detected, classification is skipped and local confirmation is required.
-
-Preferences do not authorize a particular operation or remove the requirement for explicit authorization of external writes. They do not override local sensitive-data checks, script review, the allowlist, or the confidence threshold. An explicitly allowlisted command runs through the local approval path without the classifier or these extra instructions.
-
-To express preferences for ignored temporary files, the classifier receives `operation.gitIgnore` entries with an absolute `path` and an `ignored` value: `true`, `false`, or `null` when unknown. Hiraishi runs local `git check-ignore` with a one-second timeout and sends only the results, without ignore patterns or file contents. Git applies repository and nested `.gitignore` files, `.git/info/exclude`, `core.excludesFile`, negations and the index; tracked files are not reported as ignored.
-
-These facts cover built-in tool path arguments and up to 64 literal path candidates from simple shell commands, including `rm -rf tmp/file`. Compound commands and unquoted globs do not get ignore facts. Missing Git, Git errors, paths outside the working repository and symlink traversal leave status unknown. A missing entry is also unknown. Results are a snapshot, not automatic approval: an ignored directory does not establish the status of every descendant or the full effects of a command. Preferences such as allowing ordinary edits and deletion in ignored `tmp` paths can use these results; sensitive-data checks still apply.
-
-## Allowlist
-
-Optionally save commands you trust in `~/.pi/agent/hiraishi/allowlist.json`:
-
-```json
-{
-  "commands": [["git", "diff"]]
-}
-```
-
-Entries normally match the complete command and arguments. `git diff` also accepts supported display options and paths. Compound commands, pipes, and redirects still go through review.
-
-Keep these personal files private. The repository contains only sample settings.
-
-## How a decision is made
-
-| Layer | Role |
-|---|---|
-| Local inspection | Detects credential material, network destinations, deletion, scripts and explicitly allowlisted commands. It does not infer user intent from keywords. |
-| Classifier | Receives the current and prior trusted user instructions, working directory and operation details. Checks relevance, authorization, negation, quotation and revocation under the default policy and personal preferences. |
-| Policy | Turns the facts and the classifier answer into ALLOW, ASK or DENY. |
-| Confirmation | Shows the stored operation and asks the human to approve it. |
-
-The classifier focuses confirmation on consequential risk rather than requiring proof that every step is necessary:
-
-- Ordinary investigation, reads, searches, listings, local source edits, builds and tests default to ALLOW. Weak or uncertain relevance to the task alone does not require confirmation. Supporting work and related dependencies outside the working directory do not need instructions naming every file.
-- Related, necessary local writes are ALLOW even with moderate impact when their scope is proportionate. This includes source edits, regenerating disposable reports, moving task-related files and bounded cleanup of obsolete build outputs. Deletion or overwrite alone is not high risk; high-impact, hard-to-reverse loss of valuable data requires confirmation.
-- Explicit prohibitions, exclusions and revocations still apply to ordinary operations. Clearly unrelated operations require confirmation; broad investigation, uncertain relevance and related dependencies outside the working directory do not. Unrelated private personal documents also raise privacy concerns.
-- Confirmation concentrates on sensitive access, unapproved external writes or publication, broad deletion, loss of existing work, history rewriting, production changes, permissions, system-wide changes and genuinely unknown consequential effects. Explicit authorization can cover consequential work within its stated scope; local sensitive-data checks remain in effect.
-- Saving code does not execute it. Source edits are evaluated as file modifications, so execution, deletion or network logic in the saved body does not by itself trigger confirmation. Sensitive targets and possible secret values still require local confirmation.
-- External writes require explicit user authorization for the destination and action. A request to fix code does not by itself authorize pushing or posting it.
-
-Ordinary reads and edits still go through classification to respect user restrictions and personal preferences. Without usable trusted instructions or an available classifier they require confirmation. Explicitly allowlisted commands remain preapproved locally. Operations involving credential material are confirmed locally without sending their instructions or operation to the classifier.
-
-Built-in `read` calls for existing `AGENTS.md` and `SKILL.md` files are preapproved locally after sensitive-data checks, including files outside the project. They do not require trusted user instructions or a classifier connection. Both the requested and resolved filenames must identify instruction files; unresolved paths and links to other filenames use normal classification. Length alone does not make a verified instruction path sensitive; credential patterns, configured credential values and other input fields are still checked. Like allowlisted commands, these reads bypass classifier-based restrictions and personal preferences. Reading instructions does not approve the actions described in them. Shell reads and supporting skill documentation use classification, whose default policy treats them as ordinary task preparation.
-
-Recognized script invocations are inspected locally. Writes, network access, subprocesses and imports are classification evidence rather than automatic reasons for confirmation. Routine generators, dependency downloads, builds and tests can proceed without prior human approval. The classifier receives finding counts and fixed risk categories for recognized consequential operations (such as Git publication, recursive deletion, remote uploads and privilege changes). Script text, literal arguments, URLs and payloads are omitted. This metadata is partial: dynamic targets, changed working directories, symlinks and imported behavior remain unresolved. Generic build/test filenames do not override consequential signals. Sensitive source and unreadable files still require local confirmation. The script's resolved path and content hash are checked again after classification. Inspection uses heuristics and cannot establish the safety of arbitrary code or imported modules.
-
-Recognizable secret values in verified user instructions are replaced locally while surrounding restrictions and revocations are retained. Ambiguous short/common credential values or sensitive text that cannot be redacted safely keep the local confirmation requirement. Instructions allow up to 128,000 characters per message, 256 messages and 256,000 serialized characters in total. Hiraishi does not truncate old restrictions to fit: unrecoverable hidden instructions, unverified input provenance and oversized histories still require confirmation. Legacy entries already stored as wholly withheld cannot be reconstructed. File-edit bodies are omitted before the operation-size check, so a large ordinary source edit does not require confirmation solely because of its body size; sensitive-value checks still examine the original input.
-
-The classifier evaluates compound commands as a whole. Listings separated by semicolons, `printf` headings and stderr redirected to `/dev/null` do not by themselves require confirmation; actions such as `find -exec` and `find -delete` can have side effects. Low-confidence ALLOW answers still require confirmation under `minAllowConfidence` (default `0.7` for all operations); policy guidance does not guarantee a particular model decision.
-
-Best-effort session entries named `hiraishi:decision-v1` record the decision, its source, a fixed reason and classification latency without tool arguments or instruction text. ASK sources distinguish local checks, classifier judgments, low confidence, contradictory answers, malformed responses, configuration errors and service failures. Evaluation reports include `askBySource` and each row's source/reason. These diagnostics stay in the local session unless you explicitly export or share it.
-
-## What to expect
-
-- **ALLOW:** proceed with ordinary investigation and local development without concrete consequential risk or explicit restrictions, and explicitly authorized consequential work within scope.
-- **ASK:** explain the proposed operation and request your approval before proceeding. Credential material that would leave the machine always lands here.
-- **DENY:** block operations the classifier reports as clearly improper, such as privilege abuse.
-
-Missing configuration, API failures, or uncertain decisions require confirmation rather than automatic approval. If confirmation is required but no UI is available, the operation is blocked.
-
-Set `explainBeforeAsk` to `false` for direct confirmation without an explanation from the execution model.
-
-Email addresses in instructions, operation fields, approval history and personal preferences are replaced with stable opaque aliases before either classifier transport receives them. Matching addresses retain matching aliases, and different addresses remain distinct, so destination restrictions and approval scope can still be compared. The aliases use a process-local secret key; the classifier receives no address-to-alias lookup. Original arguments remain unchanged for execution and local confirmation. Ordinary contact/author metadata alone does not require confirmation; sending messages or publishing still requires authorization. Keys, tokens, passwords and sensitive paths retain local confirmation, including when a credential happens to look like an email address. This is email redaction, not a general detector for all personal information.
-
-Your instructions and operation details may be sent to the configured classifier. Hiraishi can make mistakes and does not cover every execution path. See [security limitations](./SECURITY.md).
-
-## Optional script isolation
-
-Isolation is disabled until you configure a trusted executor in your personal `config.json`:
-
-```json
-{
-  "sandbox": {
-    "command": ["/absolute/path/to/project-sandbox", "--profile", "development"],
-    "timeoutMs": 15000
-  }
-}
-```
-
-Merge this field into your classifier settings. `command` is an argument array; its first entry must be an absolute executable path. No shell expansion is performed. The executor is responsible for providing the target project's runtime, dependencies, filesystem restrictions, network restrictions and process isolation. It can wrap a container or another sandbox system. Hiraishi does not install runtimes or verify the executor's isolation guarantees.
-
-For a supported simple script invocation, the confirmation UI offers **Run with configured sandbox**. For operations requiring confirmation, configuring an executor does not grant automatic approval. Routine scripts that pass classification can run normally without opening the isolation UI. Unconfigured, disabled, compound or unreadable invocations do not offer that choice. `sandboxVerification: false` disables the choice even when an executor is configured. When confirmation is required, normal execution is a separate choice from isolation.
-
-After approval, Hiraishi checks the script's SHA-256 and resolved path again, then starts the executor in the project directory. The executor receives one JSON document on standard input:
-
-```json
-{
-  "version": 1,
-  "cwd": "/project",
-  "script": "/tmp/verify.rb",
-  "hash": "<sha256>",
-  "source": "puts 1\n",
-  "runtime": "ruby",
-  "args": ["--example"]
-}
-```
-
-The executor must execute the supplied `source` in its isolated environment with the requested runtime and literal arguments. `script` identifies the reviewed file; reopening it on the host could execute content changed after review. Host paths may need mapping into the environment. The runtime field preserves the original executable name or path; Hiraishi does not substitute a system interpreter. The executor inherits the host environment and must filter environment variables and mount access before running code.
-
-Standard output and error are forwarded to pi. The executor's exit status is preserved; startup errors and timeouts fail the operation without retrying it as a normal run. `timeoutMs` defaults to 15000 and accepts 1 through 600000 milliseconds. The timeout kills the executor process; the executor must arrange cleanup of child processes, containers and remote jobs.
-
-## Tests and model evaluation
-
-```sh
-npm install --include=dev
+npm install --ignore-scripts
 npm run typecheck
 npm test
 ```
 
-Tests mock the classifier API and exercise the executor protocol with Node.js fixtures. The full suite also requires Linux, git, curl and bash. Filesystem integration tests use real bubblewrap when available; set `HIRAISHI_REQUIRE_BWRAP=1 npm test` to require them rather than skip when the backend cannot run. They use synthetic files and a test-owned process, and include the actual Pi SDK approval path with deterministic classification and UI responses. Ruby and Python are not test dependencies. Optional executor isolation guarantees still depend on the environment that provides that executor.
-
-To compare classifiers, copy `evaluation.sample.json` to `evaluation.json` and configure your candidates. Live API calls happen only with `--live`:
-
-```sh
-node evaluate.ts --models evaluation.json --out evaluation-offline.json
-node evaluate.ts --live --models evaluation.json --out evaluation-live.json
-```
+Sandbox integration tests require working bubblewrap and socat. Set `HIRAISHI_REQUIRE_SANDBOX=1` to make missing prerequisites an error (CI does this). `HIRAISHI_TEST_SOCAT=/absolute/path/to/socat` selects a test-only binary without modifying the installed configuration. Tests use synthetic fixtures, not host credentials.

@@ -80,12 +80,12 @@ test('work forwards each operation through the existing parent pipeline', async 
   assert(h.forwarded.every(call => (call.options as any).signal instanceof AbortSignal));
 });
 
-test('a blocked child operation stops the run and preserves the original approval request', async () => {
+test('a blocked child operation stops the run and preserves its error', async () => {
   const h = harness([response([call('read', { path: 'restricted.txt' }), call('git_diff')], 'toolUse')]);
-  h.ctx.executeTool = async () => ({ toolCall: { type: 'toolCall', id: 'nested', name: 'read', arguments: {} }, isError: true, result: { content: [{ type: 'text', text: JSON.stringify({ status: 'ASK_REVIEW_REQUIRED', requestId: 'original-request' }) }], details: {} } });
+  h.ctx.executeTool = async () => ({ toolCall: { type: 'toolCall', id: 'nested', name: 'read', arguments: {} }, isError: true, result: { content: [{ type: 'text', text: 'Sandbox network mode off: request refused' }], details: {} } });
   const result = await runSubagent({ task: 'Read restricted.txt.' }, h.ctx, () => true);
   assert.equal(result.details.status, 'blocked');
-  assert.match(result.content[0]!.text, /original-request/);
+  assert.match(result.content[0]!.text, /network mode off/);
   assert.equal(h.requests.length, 1);
 });
 
@@ -129,7 +129,7 @@ test('provider failures, missing models, bad requests and tool-call limits fail 
 });
 
 test('a replaced subagent adapter is refused before reaching the parent model', async () => {
-  const registered = new Map<string, any>([['hiraishi_review', { name: 'hiraishi_review' }]]);
+  const registered = new Map<string, any>([['read', { name: 'read' }]]);
   const pi = { registerTool: (tool: any) => registered.set(tool.name, tool), getAllTools: () => [...registered.values()].map(tool => ({ ...tool, sourceInfo: { source: 'cli', path: 'trusted-hiraishi' } })) } as unknown as ExtensionAPI;
   const installed = installSubagent(pi, () => () => true);
   assert(installed.owns(pi.getAllTools().find(tool => tool.name === 'hiraishi_subagent')));

@@ -1,21 +1,9 @@
 {
-  "endpoint": "https://classifier.example.invalid/v1/systemone",
-  "model": "your-classifier-model",
-  "apiKeyEnv": "HIRAISHI_API_KEY",
-  "auth": "bearer",
-  "minAllowConfidence": 0.7,
-  "timeoutMs": 5000,
-  "approvalTtlMs": 3600000,
-  "allowlistFile": "allowlist.json",
-  "additionalInstructions": "",
-  "explainBeforeAsk": true,
-  "filesystemSandbox": {
-    "enabled": true,
-    "readOnly": [],
-    "readWrite": []
-  }
-
-  // "locale": "ja"
-  // Uncomment to fix the interface language. Without it the locale follows
-  // LC_ALL, LC_MESSAGES or LANG, and English is used when none of them is set.
+  // The human can change this for the current session with /hiraishi-network.
+  "networkMode": "off",
+  "readOnly": [],
+  "readWrite": [],
+  // Literal paths only. Include project-specific secrets here.
+  "denyRead": []
+  // "socatPath": "/absolute/path/to/socat"
 }
