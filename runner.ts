@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
-import { hostDecision, runtimePolicy } from './policy.ts';
+import { hostDecision, runtimePolicy, NETWORK_DENIAL_GUIDANCE } from './policy.ts';
 import type { Request, Response, RunnerInit } from './protocol.ts';
 
 const require = createRequire(import.meta.url);
@@ -36,11 +36,13 @@ const active = new Map<number, () => void>();
 let init: RunnerInit | undefined;
 let policy: SandboxRuntimeConfig;
 let closing = false;
+let networkDenials = 0;
 const work = new Set<Promise<void>>();
 const send = (message: Response) => { if (process.connected) process.send!(message); };
 
 async function execute(request: Exclude<Request, { op: 'cancel' | 'shutdown' }>) {
   const state = init!;
+  const initialDenials = networkDenials;
   const command = request.op === 'bash' ? request.command : [process.execPath, '--input-type=commonjs', '-e', FILE_WORKER].map(quote).join(' ');
   const environment = `/usr/bin/env HOME=${quote(state.home)} TMPDIR=${quote(state.temp)} `;
   const controller = new AbortController();
@@ -75,8 +77,8 @@ async function execute(request: Exclude<Request, { op: 'cancel' | 'shutdown' }>)
     const text = Buffer.concat(output).toString();
     if (request.op !== 'bash' && code !== 0) throw new Error(text.slice(0, 2000) || 'Sandbox file operation failed');
     const data = request.op === 'bash' ? undefined : (JSON.parse(text) as { data?: string }).data;
-    send({ type: 'result', id: request.id, exitCode: code, ...(data ? { data } : {}) });
-  } catch (error) { send({ type: 'result', id: request.id, error: String((error as Error).message) }); }
+    send({ type: 'result', id: request.id, exitCode: code, ...(data ? { data } : {}), networkDenied: networkDenials !== initialDenials });
+  } catch (error) { send({ type: 'result', id: request.id, error: String((error as Error).message) + (networkDenials !== initialDenials ? `\n${NETWORK_DENIAL_GUIDANCE}` : ''), networkDenied: networkDenials !== initialDenials }); }
   finally {
     if (timer) clearTimeout(timer);
     // A completed shell can leave descendants behind; never let them retain a namespace or proxy connection.
@@ -103,7 +105,17 @@ process.on('message', (message: RunnerInit | Request) => {
       const missing = dependencies.errors.filter(e => !(init!.config.socatPath && e === 'socat not installed'));
       if (missing.length || dependencies.warnings.length) throw new Error([...missing, ...dependencies.warnings].join('; '));
       policy = runtimePolicy({ ...init!, srtRoot });
-      await SandboxManager.initialize(policy, async ({ host }) => hostDecision(init!.mode, host), false);
+      const filterRequest = policy.network.filterRequest!;
+      policy.network.filterRequest = async request => {
+        const decision = await filterRequest(request);
+        if (decision.action === 'deny') ++networkDenials;
+        return decision;
+      };
+      await SandboxManager.initialize(policy, async ({ host }) => {
+        const decision = hostDecision(init!.mode, host);
+        if (decision !== true) ++networkDenials;
+        return decision;
+      }, false);
       // A root read deny also masks SRT's early socket mounts; re-expose only its own relay endpoints.
       const sockets = [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()].filter((p): p is string => !!p);
       policy = { ...policy, credentials: { files: [...(policy.credentials?.files ?? []), { path: SandboxManager.getMitmCA()!.keyPath, mode: 'deny' }] }, filesystem: { ...policy.filesystem, allowRead: [...(policy.filesystem.allowRead ?? []), ...sockets.map(path => ({ path, literal: true as const }))] } };

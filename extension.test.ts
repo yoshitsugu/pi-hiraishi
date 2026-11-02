@@ -20,6 +20,10 @@ test('extension replaces all basic tools and exposes network changes only as a h
   const h=harness();
   assert.deepEqual([...h.tools.keys()],['read','write','edit','bash','hiraishi_subagent']);
   assert(h.commands.has('hiraishi-network'));
+  const guidance=h.tools.get('bash').promptGuidelines.join(' ');
+  assert.match(guidance,/pause the affected work/);
+  assert.match(guidance,/continue offline/);
+  assert.match(guidance,/Wait for their answer/);
   assert(!h.tools.has('hiraishi_review'));
   assert(!h.tools.has('hiraishi-network'));
   for(const event of ['session_before_switch','session_before_fork','session_before_tree','session_shutdown','session_start','session_tree','user_bash']) assert(h.handlers.has(event));

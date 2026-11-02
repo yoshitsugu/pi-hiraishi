@@ -45,6 +45,12 @@ try {
       const before=seen.length;
       const post=await proxyRequest('POST',agent);
       assert.equal(post.status,mode==='http-get'?403:200);assert.equal(post.reused,true);
+      if(mode==='http-get') {
+        assert.match(post.body,/network mode http-get/);
+        assert.match(post.body,/pause the affected work/);
+        assert.match(post.body,/continue offline/);
+        assert.match(post.body,/http-all/);
+      }
       for(const method of ['PUT','DELETE']) {
         const next=await tlsAgent();
         try {assert.equal((await proxyRequest(method,next)).status,mode==='http-get'?403:200);}finally{next.destroy();}

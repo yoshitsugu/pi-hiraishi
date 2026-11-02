@@ -63,8 +63,10 @@ export function allowsHost(mode: NetworkMode, host: string): boolean {
     return !isIP(normalized) && normalized !== 'localhost' && !normalized.endsWith('.localhost') && normalized.includes('.');
   } catch { return false; }
 }
+export const NETWORK_DENIAL_GUIDANCE = 'When sandbox network access is denied, if fresh information is needed or network access would make progress more efficient, pause the affected work instead of silently relying on memory or guesses. Explain the missing information and ask the user to choose: continue offline with explicit limitations, or enable the minimum necessary session network mode (/hiraishi-network http-get for GET/HEAD, /hiraishi-network http-all for other HTTP methods). Wait for their answer; never change permissions yourself. If delegated, return the choice to the parent. Do not suggest a mode change for destinations or protocols blocked in every mode.';
+
 export function hostDecision(mode: NetworkMode, host: string): true | { allow: false; reason: string } {
-  return allowsHost(mode, host) ? true : { allow: false, reason: `Hiraishi network mode ${mode}: ${mode === 'off' ? 'external network is disabled' : 'a public DNS hostname is required; literal IPs, localhost and single-label names are not permitted'}.` };
+  return allowsHost(mode, host) ? true : { allow: false, reason: `Hiraishi network mode ${mode}: ${mode === 'off' ? 'external network is disabled' : 'a public DNS hostname is required; literal IPs, localhost and single-label names are not permitted'}. ${NETWORK_DENIAL_GUIDANCE}` };
 }
 export interface PolicyInput { cwd: string; configPath: string; runtimeRoot: string; srtRoot: string; temp: string; home: string; mode: NetworkMode; config: Config; agentDir?: string }
 export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
@@ -107,7 +109,7 @@ export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
       filterRequest: async request => {
         const allowed = mode !== 'off' && !request.headers.has('upgrade') && request.method !== 'CONNECT' &&
           (mode === 'http-all' || request.method === 'GET' || request.method === 'HEAD');
-        return allowed ? { action: 'allow' } : { action: 'deny', reason: `Hiraishi network mode ${mode}: request refused. Ask the user to change the session network mode if needed.` };
+        return allowed ? { action: 'allow' } : { action: 'deny', reason: `Hiraishi network mode ${mode}: request refused. ${NETWORK_DENIAL_GUIDANCE}` };
       },
     },
     ...(config.socatPath ? { socatPath: config.socatPath } : {}),

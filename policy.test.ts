@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
-import { runtimePolicy, allowsHost, validateConfig, parseJsonc } from './policy.ts';
+import { runtimePolicy, allowsHost, hostDecision, validateConfig, parseJsonc } from './policy.ts';
 
 test('configuration rejects legacy classifier settings and malformed grants', () => {
   for (const value of [null, [], { endpoint: 'https://classifier' }, { networkMode: 'all' }, { readOnly: ['relative'] }, { readWrite: ['/'] , unknown: true }, { denyRead: ['/tmp/*'] }, { socatPath: 'socat' }]) assert.throws(() => validateConfig(value));
@@ -12,6 +12,14 @@ test('open HTTP sessions refuse literal IPs and localhost before the SRT DNS exe
   for (const host of ['localhost','LOCALHOST.','a.localhost','127.0.0.1','127.1','2130706433','0x7f000001','169.254.169.254','[::1]','::ffff:127.0.0.1','[::ffff:169.254.169.254]','1.1.1.1']) assert.equal(allowsHost('http-all', host), false, host);
   assert.equal(allowsHost('http-get', 'example.com'), true);
   assert.equal(allowsHost('off', 'example.com'), false);
+  const denied = hostDecision('off', 'example.com');
+  assert.notEqual(denied, true);
+  if (denied !== true) {
+    assert.match(denied.reason, /network mode off/);
+    assert.match(denied.reason, /pause the affected work/);
+    assert.match(denied.reason, /continue offline/);
+    assert.match(denied.reason, /Wait for their answer/);
+  }
 });
 test('SRT policy combines method filtering with TLS and opaque tunnel refusal', async () => {
   const root = mkdtempSync('/tmp/hiraishi-policy-');

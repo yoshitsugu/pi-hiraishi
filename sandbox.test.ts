@@ -80,6 +80,20 @@ integration('cancellation and timeout stop commands without a host fallback', as
     assert(!existsSync(`${f.root}/project/cancelled`)); assert(!existsSync(`${f.root}/project/timeout`));
   } finally {await f.cleanup();}
 });
+integration('network refusal guidance survives clients discarding the proxy response body', async () => {
+  const f=await fixture();
+  try {
+    let output='';
+    const result=await createOperations(f.session).bash.exec('curl -sS -o /dev/null --max-time 5 http://example.com; printf finished',f.session.cwd,{onData:d=>output+=d,timeout:10});
+    assert.equal(result.exitCode,0);
+    assert.match(output,/finished/);
+    assert.match(output,/network access was refused/);
+    assert.match(output,/pause the affected work/);
+    assert.match(output,/continue offline/);
+    assert.match(output,/Wait for their answer/);
+    assert.match(output,/hiraishi-network http-get/);
+  } finally {await f.cleanup();}
+});
 integration('direct TCP, Unix sockets, and proxy connections to internal services are refused', async () => {
   const server=createServer(socket=>socket.end('host service'));
   server.listen(0,'127.0.0.1');await once(server,'listening');

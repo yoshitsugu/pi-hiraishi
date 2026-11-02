@@ -4,7 +4,7 @@ import {
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, createBashToolDefinition, getAgentDir,
   type ExtensionAPI, type ExtensionContext, type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { isNetworkMode, loadConfig, type NetworkMode } from './policy.ts';
+import { isNetworkMode, loadConfig, NETWORK_DENIAL_GUIDANCE, type NetworkMode } from './policy.ts';
 import { SandboxSession } from './session.ts';
 import { createOperations } from './tools.ts';
 import { installSubagent } from './subagent.ts';
@@ -40,7 +40,7 @@ export default function hiraishi(pi: ExtensionAPI) {
   const initial: ToolDefinition<any, any, any>[] = [createReadToolDefinition(process.cwd()), createWriteToolDefinition(process.cwd()), createEditToolDefinition(process.cwd()), createBashToolDefinition(process.cwd())];
   for (const definition of initial) {
     const parameters = { ...definition.parameters }; schemas.set(definition.name, parameters);
-    pi.registerTool({ ...definition, parameters, async execute(id, input, signal, onUpdate, ctx) {
+    pi.registerTool({ ...definition, parameters, ...(definition.name === 'bash' ? { promptGuidelines: [...(definition.promptGuidelines ?? []), NETWORK_DENIAL_GUIDANCE] } : {}), async execute(id, input, signal, onUpdate, ctx) {
       const active = current(ctx); const epoch = active.epoch;
       if (!owns(definition.name)) throw new Error('Hiraishi tool was replaced; execution refused');
       const result = await definitionFor(definition.name, active, ctx.cwd, signal).execute(id, input as never, signal, onUpdate as never, ctx);

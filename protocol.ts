@@ -6,4 +6,4 @@ export type Request = { id: number; op: 'bash'; command: string; timeout?: numbe
   ({ id: number } & FileRequest) |
   { id: number; op: 'cancel'; target: number } | { id: number; op: 'shutdown' };
 export type Response = { type: 'spawned'; id: number; pid: number } | { type: 'reaped'; id: number } | { type: 'ready' } | { type: 'fatal'; error: string } | { type: 'data'; id: number; data: string } |
-  { type: 'result'; id: number; exitCode?: number; data?: string; error?: string };
+  { type: 'result'; id: number; exitCode?: number; data?: string; error?: string; networkDenied?: boolean };
