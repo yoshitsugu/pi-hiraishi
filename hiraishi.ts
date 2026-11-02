@@ -26,7 +26,7 @@ export default function hiraishi(pi: ExtensionAPI) {
     if (resolve(ctx.cwd) !== session.cwd) throw new Error('Working directory changed; start a new session');
     return session;
   };
-  const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `Hiraishi · SRT · ${session.mode}` : `Hiraishi · ${session?.status ?? 'unavailable'}`);
+  const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
   const definitionFor = (name: string, active: SandboxSession, cwd: string, signal?: AbortSignal) => {
     const op = createOperations(active, signal);
     switch (name) {
