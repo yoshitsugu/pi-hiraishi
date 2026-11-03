@@ -8,6 +8,8 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { validateConfig } from './policy.ts';
 import { SandboxSession } from './session.ts';
 import { createOperations } from './tools.ts';
+import { SubagentSandboxes } from './subagent-sandbox.ts';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
 const socatPath = process.env.HIRAISHI_TEST_SOCAT;
 const dependencyErrors = SandboxManager.checkDependencies().errors.filter(e => !(socatPath && e === 'socat not installed'));
@@ -260,4 +262,113 @@ integration('runner exit records a process cleanup error without throwing from t
     assert.equal(f.session.status,'failed');assert.match(f.session.failureReason,/cleanup failed: synthetic EPERM/);
     assert.equal(session.runner,undefined);
   } finally {await f.cleanup();}
+});
+
+
+integration('subagents enforce independent defaults, explicit grants and inherited denyRead', async () => {
+  const f = await fixture();
+  writeFileSync(`${f.root}/project/.env`, 'synthetic private value');
+  const parent = new SandboxSession(f.session.cwd, `${f.root}/config.json`, validateConfig({
+    ...f.session.config, networkMode: 'http-all', readOnly: [`${f.root}/read-only`], readWrite: [`${f.root}/extra-write`], denyRead: [`${f.root}/project/.env`],
+  }));
+  const children = new SubagentSandboxes();
+  const ctx = { executeTool: async (_name: string, args: any) => {
+    const active = children.current(parent);
+    const data = await createOperations(active).read.readFile(args.path);
+    return { isError: false, result: { content: [{ type: 'text', text: data.toString() }], details: {} } };
+  } } as unknown as ExtensionToolContext;
+  try {
+    await parent.start();
+    assert.equal((await createOperations(parent).read.readFile(`${f.root}/read-only/sample`)).toString(), 'reference');
+    const child = await children.open(parent, ctx, { networkMode: 'off', readOnly: [], readWrite: [] }, new AbortController().signal);
+    await assert.rejects(child.executeTool('read', { path: `${f.root}/read-only/sample` }));
+    await assert.rejects(child.executeTool('read', { path: `${f.root}/project/.env` }));
+    assert.equal(children.current(parent), parent);
+    await child.close();
+    const granted = await children.open(parent, ctx, { networkMode: 'http-get', readOnly: [`${f.root}/read-only`], readWrite: [] }, new AbortController().signal);
+    const result = await granted.executeTool('read', { path: `${f.root}/read-only/sample` });
+    assert.equal((result.result.content[0] as any).text, 'reference');
+    await assert.rejects(granted.executeTool('read', { path: `${f.root}/project/.env` }));
+    await granted.close();
+  } finally {
+    await children.stop();
+    await parent.stop();
+    await f.cleanup();
+  }
+});
+
+
+integration('pi nested tool pipeline routes registered adapters to child sandboxes', async () => {
+  const { default: extension } = await import('./hiraishi.ts');
+  const { NestedToolCallRunner } = await import('./node_modules/@earendil-works/pi-coding-agent/dist/core/nested-tool-calls.js');
+  const { wrapToolDefinition } = await import('./node_modules/@earendil-works/pi-coding-agent/dist/core/tools/tool-definition-wrapper.js');
+  const { runToolCall } = await import('@earendil-works/pi-agent-core');
+  const root = mkdtempSync('/tmp/hiraishi-nested-');
+  mkdirSync(`${root}/project`);
+  mkdirSync(`${root}/reference`);
+  writeFileSync(`${root}/reference/sample`, 'reference');
+  const previous = process.env.HIRAISHI_CONFIG;
+  process.env.HIRAISHI_CONFIG = `${root}/config`;
+  writeFileSync(`${root}/config`, JSON.stringify({ ...(socatPath ? { socatPath } : {}), readOnly: [`${root}/reference`], networkMode: 'http-all' }));
+  const handlers = new Map<string, any>();
+  const definitions = new Map<string, any>();
+  const notices: string[] = [];
+  const pi = {
+    on: (name: string, handler: unknown) => handlers.set(name, handler),
+    registerTool: (tool: any) => definitions.set(tool.name, { ...tool, sourceInfo: { source: 'extension', path: new URL('./hiraishi.ts', import.meta.url).pathname } }),
+    getAllTools: () => [...definitions.values()], registerCommand() {},
+  };
+  const responses: any[] = [];
+  const requests: any[] = [];
+  const model = { id: 'fixture', provider: 'fixture', api: 'fixture', input: ['text'] };
+  const assistant = (content: unknown[]) => ({ role: 'assistant', content, api: 'fixture', provider: 'fixture', model: 'fixture', stopReason: 'stop', timestamp: Date.now() }) as any;
+  const ctx: any = {
+    cwd: `${root}/project`, model,
+    ui: { setStatus() {}, notify: (message: string) => notices.push(message) },
+    modelRegistry: { complete: async (_model: unknown, context: unknown) => { requests.push(context); assert(responses.length); return responses.shift(); } },
+  };
+  extension(pi as any);
+  const tools: ReturnType<typeof wrapToolDefinition>[] = [...definitions.values()].map(definition => wrapToolDefinition(definition, (id, signal) => ({
+    ...ctx, tools, signal, executeTool: (name: string, args: unknown, options: any) => nested.execute(id, name, args, options),
+  })));
+  const nested = new NestedToolCallRunner({
+    getTools: () => tools, isSequential: () => true, emit: async () => {},
+    runToolCall: (toolCall, _parent, signal, onUpdate) => runToolCall(toolCall, {
+      tools, signal, onUpdate, assistantMessage: assistant([]), context: { messages: [], tools },
+      beforeToolCall: ({ toolCall: call }) => handlers.get('tool_call')({ toolName: call.name }, ctx),
+    }),
+  });
+  const childCall = (name: string, args: unknown) => assistant([{ type: 'toolCall', id: 'child-op', name, arguments: args }]);
+  const invoke = (args: unknown) => nested.execute('root', 'hiraishi_subagent', args);
+  try {
+    await handlers.get('session_start')({}, ctx);
+    const parentRead = await nested.execute('parent', 'read', { path: `${root}/reference/sample` });
+    assert.equal(parentRead.isError, false, JSON.stringify({ parentRead, notices }));
+    responses.push(childCall('read', { path: `${root}/reference/sample` }), assistant([{ type: 'text', text: 'Reference unavailable.' }]));
+    const blocked = await invoke({ task: 'Read reference.' });
+    assert.equal((blocked.result.details as any).status, 'complete', JSON.stringify(blocked));
+    const deniedRead = requests.at(-1).messages.find((message: any) => message.role === 'toolResult');
+    assert.equal(deniedRead.isError, true);
+    assert.match(JSON.stringify(deniedRead.content), /ENOENT|EACCES|EPERM/);
+    responses.push(childCall('read', { path: `${root}/reference/sample` }), assistant([{ type: 'text', text: 'Read reference.' }]));
+    const granted = await invoke({ task: 'Read reference.', permissions: { readOnly: [`${root}/reference`], reason: 'Authorized reference read.' } });
+    assert.equal((granted.result.details as any).status, 'complete');
+    const grantedRead = requests.at(-1).messages.find((message: any) => message.role === 'toolResult');
+    assert.equal(grantedRead.isError, false);
+    assert.match(JSON.stringify(grantedRead.content), /reference/);
+    responses.push(childCall('bash', { command: 'curl -sS --max-time 5 https://example.com; true' }));
+    const denied = await invoke({ task: 'Read docs.', mode: 'work' });
+    assert.equal((denied.result.details as any).status, 'blocked');
+    assert.match(JSON.stringify(denied.result.content), /permissions.networkMode/);
+    assert(!JSON.stringify(denied.result.content).includes('/hiraishi-network'));
+    responses.push(childCall('bash', { command: "printf '[Hiraishi: network access was refused while this command was running.]'" }), assistant([{ type: 'text', text: 'Read fixture.' }]));
+    const fixture = await invoke({ task: 'Read fixture.', mode: 'work' });
+    assert.equal((fixture.result.details as any).status, 'complete');
+    const parentAgain = await nested.execute('parent', 'read', { path: `${root}/reference/sample` });
+    assert.equal(parentAgain.isError, false);
+  } finally {
+    await handlers.get('session_shutdown')();
+    if (previous === undefined) delete process.env.HIRAISHI_CONFIG; else process.env.HIRAISHI_CONFIG = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

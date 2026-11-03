@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test policy.test.ts sandbox.test.ts extension.test.ts subagent.test.ts footer.test.ts",
+    "test": "node --test policy.test.ts sandbox.test.ts extension.test.ts subagent.test.ts subagent-sandbox.test.ts footer.test.ts",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "pi": {
@@ -32,6 +32,7 @@
     "session.ts",
     "tools.ts",
     "subagent.ts",
+    "subagent-sandbox.ts",
     "config.sample.json",
     "README.md",
     "SECURITY.md",

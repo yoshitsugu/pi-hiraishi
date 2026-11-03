@@ -8,6 +8,7 @@ import { isNetworkMode, loadConfig, NETWORK_DENIAL_GUIDANCE, type NetworkMode } 
 import { SandboxSession } from './session.ts';
 import { createOperations } from './tools.ts';
 import { installSubagent } from './subagent.ts';
+import { SubagentSandboxes } from './subagent-sandbox.ts';
 import { installFooter } from './footer.ts';
 
 export default function hiraishi(pi: ExtensionAPI) {
@@ -16,6 +17,7 @@ export default function hiraishi(pi: ExtensionAPI) {
   let error = 'Hiraishi session has not started';
   let lifecycle = {};
   let retirement = Promise.resolve();
+  const children = new SubagentSandboxes();
   const sourcePath = fileURLToPath(import.meta.url);
   const schemas = new Map<string, object>();
   const owns = (name: string) => {
@@ -25,11 +27,11 @@ export default function hiraishi(pi: ExtensionAPI) {
   const current = (ctx: ExtensionContext) => {
     if (!session || session.status !== 'ready') throw new Error(session ? `Hiraishi sandbox ${session.status}: ${session.failureReason}` : error);
     if (resolve(ctx.cwd) !== session.cwd) throw new Error('Working directory changed; start a new session');
-    return session;
+    return children.current(session);
   };
   const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
-  const definitionFor = (name: string, active: SandboxSession, cwd: string, signal?: AbortSignal) => {
-    const op = createOperations(active, signal);
+  const definitionFor = (name: string, active: SandboxSession, cwd: string, signal?: AbortSignal, onNetworkDenied?: () => void) => {
+    const op = createOperations(active, signal, onNetworkDenied);
     switch (name) {
       case 'read': return createReadToolDefinition(cwd, { operations: op.read });
       case 'write': return createWriteToolDefinition(cwd, { operations: op.write });
@@ -44,16 +46,17 @@ export default function hiraishi(pi: ExtensionAPI) {
     pi.registerTool({ ...definition, parameters, ...(definition.name === 'bash' ? { promptGuidelines: [...(definition.promptGuidelines ?? []), NETWORK_DENIAL_GUIDANCE] } : {}), async execute(id, input, signal, onUpdate, ctx) {
       const active = current(ctx); const epoch = active.epoch;
       if (!owns(definition.name)) throw new Error('Hiraishi tool was replaced; execution refused');
-      const result = await definitionFor(definition.name, active, ctx.cwd, signal).execute(id, input as never, signal, onUpdate as never, ctx);
+      let networkDenied = false;
+      const result = await definitionFor(definition.name, active, ctx.cwd, signal, () => { networkDenied = true; }).execute(id, input as never, signal, onUpdate as never, ctx);
       active.assertEpoch(epoch);
-      if (active !== session) throw new Error('Session changed; discard this result');
-      return result;
+      if (active !== current(ctx)) throw new Error('Session changed; discard this result');
+      return networkDenied ? { ...result, details: { ...result.details, networkDenied: true } } : result;
     } });
   }
   const subagent = installSubagent(pi, ctx => {
     const parent = current(ctx), epoch = parent.epoch;
     return () => parent === session && parent.status === 'ready' && parent.epoch === epoch;
-  });
+  }, (ctx, permissions, signal) => children.open(current(ctx), ctx, permissions, signal));
   pi.on('tool_call', (event, ctx) => {
     try {
       current(ctx);
@@ -70,12 +73,10 @@ export default function hiraishi(pi: ExtensionAPI) {
     const active = session;
     session = undefined;
     error = 'Hiraishi session has ended';
-    if (active) {
-      const ending = active.stop();
-      retirement = Promise.all([retirement, ending]).then(() => {});
-      // Keep failed cleanup observable to subsequent starts even when pi catches hook errors.
-      void retirement.catch(() => {});
-    }
+    const ending = active?.stop();
+    retirement = Promise.all([retirement, ending, children.stop()]).then(() => {});
+    // Keep failed cleanup observable to subsequent starts even when pi catches hook errors.
+    void retirement.catch(() => {});
     return retirement;
   };
   pi.on('session_before_switch', stop);
@@ -112,6 +113,7 @@ export default function hiraishi(pi: ExtensionAPI) {
         const active = current(ctx);
         if (mode === active.mode) { display(ctx); return; }
         ctx.ui.notify('Changing network mode stops running tools and downloads. Completed external effects cannot be undone.', 'warning');
+        await children.stop();
         await active.changeMode(mode as NetworkMode);
       } catch (e) { if (token === lifecycle) ctx.ui.notify(`Hiraishi: ${(e as Error).message}`, 'error'); }
       if (token === lifecycle) display(ctx);

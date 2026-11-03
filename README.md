@@ -63,7 +63,26 @@ Mode changes stop running tools and connections. Interrupted calls require retry
 
 `read`, `write`, `edit`, `bash` and `!` / `!!` commands share the sandbox. Unadapted custom tools are refused.
 
-`hiraishi_subagent` shares the parent's model and permissions. Its default `review` mode allows reads and fixed Git diff/status commands; `work` also allows writes, edits and bash. It cannot delegate recursively or change permissions.
+`hiraishi_subagent` starts a separate sandbox with network off and workspace access only, regardless of the parent's network mode or configured grants. System runtimes and dedicated HOME/temp directories remain available, and configured `denyRead` rules remain enforced. Its default `review` mode allows reads and fixed Git diff/status commands; `work` also allows writes, edits and bash. It cannot delegate recursively or change its own permissions.
+
+The parent can explicitly grant `permissions.networkMode`, `permissions.readOnly` and `permissions.readWrite` for one invocation, with a `reason`. The parent is instructed to approve only grants covered by existing user authorization. When unsure, it sets `permissions.approval` to `"user"`: a dialog offers cancellation, default permissions or the requested permissions. Without an interactive UI this choice blocks execution. Parent judgment is model guidance; the selected sandbox permissions are enforced by SRT. Grants are discarded when the child finishes, and do not change the parent or later children. A blocked child returns the operation and reason so the parent can assess permissions and retry.
+
+Use `model: { "provider": "...", "id": "..." }` to choose any chat model registered with pi, including another provider. Omit `model` to use the parent's model. Hiraishi adds no model allowlist. Pi resolves provider authentication on the host; credentials are not forwarded to the sandbox. Unknown models and provider failures stop execution without switching to another model.
+
+Example tool arguments (replace the provider and ID with a registered model):
+
+```json
+{
+  "task": "Update the API integration using the current documentation.",
+  "mode": "work",
+  "model": { "provider": "your-provider", "id": "your-model-id" },
+  "permissions": {
+    "networkMode": "http-get",
+    "approval": "user",
+    "reason": "Reading the current API documentation needs network access."
+  }
+}
+```
 
 Files are limited to 32 MiB. Shell commands default to 120 seconds, with explicit timeouts up to one hour. Commands and descendants stop at completion or cancellation; persistent background servers are unsupported.
 

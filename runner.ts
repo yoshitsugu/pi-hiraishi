@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
-import { hostDecision, runtimePolicy, NETWORK_DENIAL_GUIDANCE } from './policy.ts';
+import { hostDecision, runtimePolicy, networkDenialGuidance } from './policy.ts';
 import type { Request, Response, RunnerInit } from './protocol.ts';
 
 const require = createRequire(import.meta.url);
@@ -78,7 +78,7 @@ async function execute(request: Exclude<Request, { op: 'cancel' | 'shutdown' }>)
     if (request.op !== 'bash' && code !== 0) throw new Error(text.slice(0, 2000) || 'Sandbox file operation failed');
     const data = request.op === 'bash' ? undefined : (JSON.parse(text) as { data?: string }).data;
     send({ type: 'result', id: request.id, exitCode: code, ...(data ? { data } : {}), networkDenied: networkDenials !== initialDenials });
-  } catch (error) { send({ type: 'result', id: request.id, error: String((error as Error).message) + (networkDenials !== initialDenials ? `\n${NETWORK_DENIAL_GUIDANCE}` : ''), networkDenied: networkDenials !== initialDenials }); }
+  } catch (error) { send({ type: 'result', id: request.id, error: String((error as Error).message) + (networkDenials !== initialDenials ? `\n${networkDenialGuidance(state.delegated)}` : ''), networkDenied: networkDenials !== initialDenials }); }
   finally {
     if (timer) clearTimeout(timer);
     // A completed shell can leave descendants behind; never let them retain a namespace or proxy connection.
@@ -112,7 +112,7 @@ process.on('message', (message: RunnerInit | Request) => {
         return decision;
       };
       await SandboxManager.initialize(policy, async ({ host }) => {
-        const decision = hostDecision(init!.mode, host);
+        const decision = hostDecision(init!.mode, host, init!.delegated);
         if (decision !== true) ++networkDenials;
         return decision;
       }, false);

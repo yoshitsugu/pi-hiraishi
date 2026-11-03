@@ -1,9 +1,9 @@
 import type { BashOperations, ReadOperations, WriteOperations, EditOperations } from '@earendil-works/pi-coding-agent';
-import { NETWORK_DENIAL_GUIDANCE } from './policy.ts';
+import { networkDenialGuidance } from './policy.ts';
 import type { FileOperation } from './protocol.ts';
 import type { SandboxSession } from './session.ts';
 
-export function createOperations(session: SandboxSession, signal?: AbortSignal) {
+export function createOperations(session: SandboxSession, signal?: AbortSignal, onNetworkDenied?: () => void) {
   const epoch = session.epoch;
   const file = async (op: FileOperation, path: string, content?: string) => {
     session.assertEpoch(epoch);
@@ -27,7 +27,10 @@ export function createOperations(session: SandboxSession, signal?: AbortSignal) 
     session.assertEpoch(epoch);
     if (cwd !== session.cwd) throw new Error('Working directory changed; start a new Hiraishi session');
     const result = await session.request({ op: 'bash', command, timeout: options.timeout }, { signal: options.signal ?? signal, onData: options.onData });
-    if (result.networkDenied) options.onData(Buffer.from(`\n[Hiraishi: network access was refused while this command was running.] ${NETWORK_DENIAL_GUIDANCE}\n`));
+    if (result.networkDenied) {
+      onNetworkDenied?.();
+      options.onData(Buffer.from(`\n[Hiraishi: network access was refused while this command was running.] ${networkDenialGuidance(session.delegated)}\n`));
+    }
     return { exitCode: result.exitCode ?? 1 };
   } };
   return { read, write, edit, bash };

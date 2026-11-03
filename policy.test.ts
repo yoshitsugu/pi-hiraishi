@@ -13,6 +13,12 @@ test('open HTTP sessions refuse literal IPs and localhost before the SRT DNS exe
   assert.equal(allowsHost('http-get', 'example.com'), true);
   assert.equal(allowsHost('off', 'example.com'), false);
   const denied = hostDecision('off', 'example.com');
+  const childDenied = hostDecision('off', 'example.com', true);
+  assert.notEqual(childDenied, true);
+  if (childDenied !== true) {
+    assert.match(childDenied.reason, /permissions.networkMode/);
+    assert(!childDenied.reason.includes('/hiraishi-network'));
+  }
   assert.notEqual(denied, true);
   if (denied !== true) {
     assert.match(denied.reason, /network mode off/);
@@ -37,6 +43,13 @@ test('SRT policy combines method filtering with TLS and opaque tunnel refusal', 
         assert.equal(result.action, mode === 'http-all' || mode === 'http-get' && ['GET','HEAD'].includes(method) ? 'allow' : 'deny');
       }
       assert.equal((await p.network.filterRequest!(new Request('https://example.com', { headers: { Upgrade: 'websocket' } }))).action, 'deny');
+    }
+    const childPolicy = runtimePolicy({ ...input, mode: 'off', delegated: true });
+    const childDenied = await childPolicy.network.filterRequest!(new Request('https://example.com'));
+    assert.equal(childDenied.action, 'deny');
+    if (childDenied.action === 'deny') {
+      assert.match(childDenied.reason ?? '', /permissions.networkMode/);
+      assert(!(childDenied.reason ?? '').includes('/hiraishi-network'));
     }
     assert.throws(() => runtimePolicy({ ...input, cwd: '/', mode: 'off' }));
     assert.throws(() => runtimePolicy({ ...input, cwd: '/usr/local', mode: 'off' }));

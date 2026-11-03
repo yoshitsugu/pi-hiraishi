@@ -65,10 +65,13 @@ export function allowsHost(mode: NetworkMode, host: string): boolean {
 }
 export const NETWORK_DENIAL_GUIDANCE = 'When sandbox network access is denied, if fresh information is needed or network access would make progress more efficient, pause the affected work instead of silently relying on memory or guesses. Explain the missing information and ask the user to choose: continue offline with explicit limitations, or enable the minimum necessary session network mode (/hiraishi-network http-get for GET/HEAD, /hiraishi-network http-all for other HTTP methods). Wait for their answer; never change permissions yourself. If delegated, return the choice to the parent. Do not suggest a mode change for destinations or protocols blocked in every mode.';
 
-export function hostDecision(mode: NetworkMode, host: string): true | { allow: false; reason: string } {
-  return allowsHost(mode, host) ? true : { allow: false, reason: `Hiraishi network mode ${mode}: ${mode === 'off' ? 'external network is disabled' : 'a public DNS hostname is required; literal IPs, localhost and single-label names are not permitted'}. ${NETWORK_DENIAL_GUIDANCE}` };
+export const SUBAGENT_NETWORK_DENIAL_GUIDANCE = 'Subagent network access was denied. Stop the affected work and return the exact operation and minimum necessary permission to the parent. The parent may retry hiraishi_subagent with permissions.networkMode=http-get for GET/HEAD or http-all for other HTTP methods when user authorization covers it; if unsure, set permissions.approval=user so the user can choose. Do not request extra permission for destinations or protocols blocked in every mode.';
+export const networkDenialGuidance = (delegated = false) => delegated ? SUBAGENT_NETWORK_DENIAL_GUIDANCE : NETWORK_DENIAL_GUIDANCE;
+
+export function hostDecision(mode: NetworkMode, host: string, delegated = false): true | { allow: false; reason: string } {
+  return allowsHost(mode, host) ? true : { allow: false, reason: `Hiraishi network mode ${mode}: ${mode === 'off' ? 'external network is disabled' : 'a public DNS hostname is required; literal IPs, localhost and single-label names are not permitted'}. ${networkDenialGuidance(delegated)}` };
 }
-export interface PolicyInput { cwd: string; configPath: string; runtimeRoot: string; srtRoot: string; temp: string; home: string; mode: NetworkMode; config: Config; agentDir?: string }
+export interface PolicyInput { cwd: string; configPath: string; runtimeRoot: string; srtRoot: string; temp: string; home: string; mode: NetworkMode; config: Config; agentDir?: string; delegated?: boolean }
 export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
   const { config, mode, temp, home } = input;
   const cwd = realpathSync(input.cwd);
@@ -109,7 +112,7 @@ export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
       filterRequest: async request => {
         const allowed = mode !== 'off' && !request.headers.has('upgrade') && request.method !== 'CONNECT' &&
           (mode === 'http-all' || request.method === 'GET' || request.method === 'HEAD');
-        return allowed ? { action: 'allow' } : { action: 'deny', reason: `Hiraishi network mode ${mode}: request refused. ${NETWORK_DENIAL_GUIDANCE}` };
+        return allowed ? { action: 'allow' } : { action: 'deny', reason: `Hiraishi network mode ${mode}: request refused. ${networkDenialGuidance(input.delegated)}` };
       },
     },
     ...(config.socatPath ? { socatPath: config.socatPath } : {}),

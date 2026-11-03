@@ -24,9 +24,9 @@ export class SandboxSession {
   private cancelLaunch?: () => void;
   private cleanupFailure?: Error;
   mode: NetworkMode = 'off';
-  readonly cwd: string; readonly configPath: string; readonly config: Config; readonly agentDir: string;
-  constructor(cwd: string, configPath: string, config: Config, agentDir = join(homedir(), '.pi/agent')) {
-    this.cwd = cwd; this.configPath = configPath; this.config = config; this.agentDir = agentDir;
+  readonly cwd: string; readonly configPath: string; readonly config: Config; readonly agentDir: string; readonly delegated: boolean;
+  constructor(cwd: string, configPath: string, config: Config, agentDir = join(homedir(), '.pi/agent'), delegated = false) {
+    this.cwd = cwd; this.configPath = configPath; this.config = config; this.agentDir = agentDir; this.delegated = delegated;
   }
   get status() { return this.state; }
   get failureReason() { return this.failure; }
@@ -147,7 +147,7 @@ export class SandboxSession {
         if (message.type === 'data') p.onData?.(Buffer.from(message.data, 'base64'));
         else { this.pending.delete(message.id); p.cleanup(); message.error ? p.reject(new Error(message.error)) : p.resolve(message); }
       });
-      child.send({ cwd: realpathSync(this.cwd), configPath: this.configPath, config: this.config, mode, runtimeRoot: root, temp, home, agentDir: this.agentDir });
+      child.send({ cwd: realpathSync(this.cwd), configPath: this.configPath, config: this.config, mode, runtimeRoot: root, temp, home, agentDir: this.agentDir, delegated: this.delegated });
     });
   }
   private killToolProcesses() {
