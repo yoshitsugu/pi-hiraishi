@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test policy.test.ts sandbox.test.ts extension.test.ts subagent.test.ts",
+    "test": "node --test policy.test.ts sandbox.test.ts extension.test.ts subagent.test.ts footer.test.ts",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "pi": {
@@ -12,7 +12,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.4.0 <1.5.0"
+    "@earendil-works/pi-coding-agent": ">=1.4.0 <1.5.0",
+    "@earendil-works/pi-tui": ">=1.4.0 <1.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -24,6 +25,7 @@
   },
   "files": [
     "hiraishi.ts",
+    "footer.ts",
     "policy.ts",
     "protocol.ts",
     "runner.ts",

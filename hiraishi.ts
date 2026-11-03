@@ -8,6 +8,7 @@ import { isNetworkMode, loadConfig, NETWORK_DENIAL_GUIDANCE, type NetworkMode } 
 import { SandboxSession } from './session.ts';
 import { createOperations } from './tools.ts';
 import { installSubagent } from './subagent.ts';
+import { installFooter } from './footer.ts';
 
 export default function hiraishi(pi: ExtensionAPI) {
   const configPath = resolve(process.env.HIRAISHI_CONFIG ?? join(getAgentDir(), 'hiraishi', 'config.json'));
@@ -82,6 +83,7 @@ export default function hiraishi(pi: ExtensionAPI) {
   pi.on('session_before_tree', stop);
   pi.on('session_shutdown', stop);
   const start = async (ctx: ExtensionContext) => {
+    installFooter(pi, ctx);
     const token = lifecycle;
     try {
       await retirement;
