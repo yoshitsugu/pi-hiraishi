@@ -7,7 +7,7 @@ import { canonicalPath, ceilingViolations, networkRank, parseGrants, within, typ
 export const HOST_TOOL = 'hiraishi_host';
 
 export interface HostScope { ceiling: Ceiling; writable: string[]; denyRead: string[] }
-export interface HostExec { (bin: string, args: string[], options: { timeout: number; cwd: string; signal?: AbortSignal }): Promise<{ output: string; failed: boolean; aborted?: boolean }> }
+export interface HostExec { (bin: string, args: string[], options: { timeout: number; cwd: string; env?: string[]; signal?: AbortSignal }): Promise<{ output: string; failed: boolean; aborted?: boolean }> }
 export interface HostOptions {
   hiraishiPath: string;
   scope: (ctx: ExtensionToolContext) => HostScope;
@@ -56,7 +56,8 @@ function request(value: unknown): Request {
 }
 
 const defaultExec: HostExec = (bin, args, options) => new Promise(resolve => {
-  const env = Object.fromEntries(envKeys.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]!]));
+  const keys = [...new Set([...envKeys, ...(options.env ?? [])])];
+  const env = Object.fromEntries(keys.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]!]));
   execFile(bin, args, { timeout: options.timeout * 1000, cwd: options.cwd, env, signal: options.signal, maxBuffer: 4 * 1024 * 1024 },
     (error, stdout, stderr) => resolve({
       output: `${stdout}${stderr}`.trim(),
@@ -155,13 +156,13 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
     });
   };
 
-  const spawn = async (bin: string, argv: string[], timeout: number, cwd: string, signal?: AbortSignal) => {
+  const spawn = async (bin: string, argv: string[], timeout: number, cwd: string, env: string[] | undefined, signal?: AbortSignal) => {
     if (signal?.aborted) return { output: '', failed: false, aborted: true };
     const controller = new AbortController();
     running.add(controller);
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
-    try { return await exec(bin, argv, { timeout, cwd, signal: controller.signal }); }
+    try { return await exec(bin, argv, { timeout, cwd, env, signal: controller.signal }); }
     finally { running.delete(controller); signal?.removeEventListener('abort', abort); }
   };
 
@@ -194,7 +195,7 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
           if (usesName && command.starts === operation.name && p.name && tracked.has(p.name))
             throw new Error(`A child named ${p.name} already exists for ${command.name}.`);
         });
-        const outcome = await spawn(bin, argv, timeout, '/', signal);
+        const outcome = await spawn(bin, argv, timeout, '/', command.env, signal);
         const text = outcome.output || `${command.name} ${operation.name} finished without output.`;
         if (outcome.aborted) return result('cancelled', 'Host command cancelled.');
         if (outcome.failed) return result('failed', clip(text));

@@ -8,7 +8,7 @@ export type NetworkMode = 'off' | 'http-get' | 'http-all';
 export type HostPlaceholder = '{name}' | '{cwd}' | '{task}' | '{grants}' | '{lines}' | '{timeout}' | '{hiraishi}';
 export const hostPlaceholders: readonly HostPlaceholder[] = ['{name}', '{cwd}', '{task}', '{grants}', '{lines}', '{timeout}', '{hiraishi}'];
 export interface HostOperation { name: string; argv: string[]; timeoutSeconds?: number }
-export interface HostCommand { name: string; path: string; starts?: string; operations: HostOperation[] }
+export interface HostCommand { name: string; path: string; starts?: string; env?: string[]; operations: HostOperation[] }
 export interface Config {
   networkMode: NetworkMode;
   maxNetworkMode: NetworkMode;
@@ -63,6 +63,7 @@ export function validateConfig(value: unknown): Config {
 }
 
 const hostName = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const hostEnvName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const hostPlaceholderSet = new Set<string>(hostPlaceholders);
 function validateHostCommands(value: unknown): HostCommand[] {
   if (!Array.isArray(value) || value.length > 16) throw new Error('Invalid hostCommands: expected an array of at most 16 commands');
@@ -70,12 +71,14 @@ function validateHostCommands(value: unknown): HostCommand[] {
   return value.map((entry): HostCommand => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Invalid hostCommands entry');
     const command = entry as Record<string, unknown>;
-    if (Object.keys(command).some(key => !['name', 'path', 'starts', 'operations'].includes(key))) throw new Error('Invalid hostCommands entry');
+    if (Object.keys(command).some(key => !['name', 'path', 'starts', 'env', 'operations'].includes(key))) throw new Error('Invalid hostCommands entry');
     if (typeof command.name !== 'string' || !hostName.test(command.name)) throw new Error('Invalid hostCommands name: use 1-64 of a-z, 0-9, - or _');
     if (seen.has(command.name)) throw new Error(`Duplicate hostCommands name: ${command.name}`);
     seen.add(command.name);
     if (typeof command.path !== 'string' || !isAbsolute(command.path) || /[\x00-\x1f\x7f]/.test(command.path)) throw new Error('Invalid hostCommands path: use an absolute path');
     if (command.starts !== undefined && (typeof command.starts !== 'string' || !hostName.test(command.starts))) throw new Error('Invalid hostCommands starts');
+    if (command.env !== undefined && (!Array.isArray(command.env) || command.env.length > 32 || command.env.some(name => typeof name !== 'string' || !hostEnvName.test(name))))
+      throw new Error('Invalid hostCommands env: use up to 32 environment variable names matching [A-Za-z_][A-Za-z0-9_]*');
     if (!Array.isArray(command.operations) || !command.operations.length || command.operations.length > 32) throw new Error('Invalid hostCommands operations: expected 1-32 entries');
     const names = new Set<string>();
     const operations = command.operations.map((item): HostOperation => {
@@ -100,7 +103,7 @@ function validateHostCommands(value: unknown): HostCommand[] {
       return { name: operation.name, argv: operation.argv as string[], ...(timeoutSeconds !== undefined ? { timeoutSeconds: timeoutSeconds as number } : {}) };
     });
     if (command.starts !== undefined && !names.has(command.starts as string)) throw new Error('hostCommands starts must name an operation');
-    return { name: command.name, path: command.path, ...(command.starts !== undefined ? { starts: command.starts as string } : {}), operations };
+    return { name: command.name, path: command.path, ...(command.starts !== undefined ? { starts: command.starts as string } : {}), ...(command.env !== undefined ? { env: [...new Set(command.env as string[])] } : {}), operations };
   });
 }
 export function loadConfig(path: string): Config {

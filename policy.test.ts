@@ -226,16 +226,23 @@ test('delegated sessions can drop host commands and pin their workspace', () => 
 test('host commands are validated and never accepted from the command line', () => {
   const command = { name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [{ name: 'run', argv: ['run', '--name', '{name}', 'pi', '-e', '{hiraishi}', '--hiraishi-grants', '{grants}', '{task}'] }] };
   assert.equal(validateConfig({ hostCommands: [command] }).hostCommands?.[0]?.name, 'hc');
+  assert.deepEqual(validateConfig({ hostCommands: [{ ...command, env: ['HOME', 'AUTH_TOKEN'] }] }).hostCommands?.[0]?.env, ['HOME', 'AUTH_TOKEN']);
   for (const value of [
     { hostCommands: {} }, { hostCommands: [{ ...command, name: 'HC' }] }, { hostCommands: [command, command] },
     { hostCommands: [{ ...command, path: 'hc' }] }, { hostCommands: [{ ...command, operations: [] }] },
     { hostCommands: [{ ...command, starts: 'send' }] },
+    { hostCommands: [{ ...command, env: 'HOME' }] },
+    { hostCommands: [{ ...command, env: ['HOME', 42] }] },
+    { hostCommands: [{ ...command, env: ['HOME', '1TOKEN'] }] },
+    { hostCommands: [{ ...command, env: ['HOME', 'BAD-NAME'] }] },
+    { hostCommands: [{ ...command, env: ['HOME', ''] }] },
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: ['run', '{shell}'] }] }] },
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: [] }] }] },
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: ['run', '--max={timeout}'] }] }] },
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: ['run', '{name}', '{task}'] }] }] },
   ]) assert.throws(() => validateConfig(value));
   assert.throws(() => parseGrants(JSON.stringify({ hostCommands: [command] })), /cannot be set from the command line/);
+  assert.throws(() => parseGrants(JSON.stringify({ env: ['HOME'] })), /unknown setting env/);
 });
 
 test('grants are canonicalized so a later symlink swap cannot widen the grant', () => {

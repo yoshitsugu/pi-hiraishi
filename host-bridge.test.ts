@@ -15,18 +15,18 @@ const commands: HostCommand[] = [{
 }];
 
 interface Harness {
-  calls: { bin: string; args: string[]; timeout: number }[]; ctx: ExtensionToolContext;
+  calls: { bin: string; args: string[]; timeout: number; env?: string[] }[]; ctx: ExtensionToolContext;
   setFailed(value: boolean): void; reset(): void;
   run(input: Record<string, unknown>, signal?: AbortSignal): Promise<{ details: { status: string }; content: { text: string }[] }>;
 }
 
-function harness(configured: HostCommand[], roots: string[], options: { baseline?: Config; denyRead?: string[]; ceiling?: { networkMode: 'off' | 'http-get' | 'http-all'; readOnly: string[]; readWrite: string[] }; ctx?: ExtensionToolContext } = {}): Harness {
+function harness(configured: HostCommand[], roots: string[], options: { baseline?: Config; denyRead?: string[]; ceiling?: { networkMode: 'off' | 'http-get' | 'http-all'; readOnly: string[]; readWrite: string[] }; ctx?: ExtensionToolContext; real?: boolean } = {}): Harness {
   const tools = new Map<string, any>();
-  const calls: { bin: string; args: string[]; timeout: number }[] = [];
+  const calls: { bin: string; args: string[]; timeout: number; env?: string[] }[] = [];
   let failed = false;
   const exec: HostExec = async (bin, args, execOptions) => {
     if (execOptions.signal?.aborted) return { output: '', failed: false, aborted: true };
-    calls.push({ bin, args, timeout: execOptions.timeout });
+    calls.push({ bin, args, timeout: execOptions.timeout, env: execOptions.env });
     return { output: failed ? 'boom' : 'ok', failed };
   };
   let loading = true;
@@ -44,7 +44,7 @@ function harness(configured: HostCommand[], roots: string[], options: { baseline
     commands: () => configured,
     baseline: () => baseline,
     scope: () => ({ ceiling, writable: roots, denyRead: options.denyRead ?? [] }),
-    exec,
+    ...(options.real ? {} : { exec }),
   });
   loading = false;
   const ctx = options.ctx ?? ({} as ExtensionToolContext);
@@ -88,6 +88,36 @@ test('a configured operation runs the fixed binary with substituted, validated a
     assert.deepEqual(h.calls[3]!.args, ['ls']);
     assert.equal(list.details.status, 'complete');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a host command receives its configured environment names in addition to the fixed set', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const h = harness([{ ...commands[0]!, env: ['EXAMPLE_TOKEN', 'example_token'] }], roots, { baseline });
+    const outcome = await h.run({ command: 'hc', operation: 'list' });
+    assert.equal(outcome.details.status, 'complete');
+    assert.deepEqual(h.calls[0]!.env, ['EXAMPLE_TOKEN', 'example_token']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('only configured environment values that exist on the host are passed to the program', async () => {
+  const { root, roots, baseline } = setup();
+  const visible = 'HIRAISHI_TEST_HOST_ENV_VISIBLE';
+  const absent = 'HIRAISHI_TEST_HOST_ENV_ABSENT';
+  const previous = process.env[visible];
+  process.env[visible] = 'visible-value';
+  delete process.env[absent];
+  try {
+    const h = harness([{ name: 'env', path: '/usr/bin/env', env: [visible, absent], operations: [{ name: 'show', argv: ['env'] }] }], roots, { baseline, real: true });
+    const outcome = await h.run({ command: 'env', operation: 'show' });
+    assert.equal(outcome.details.status, 'complete');
+    assert.match(outcome.content[0]!.text, new RegExp(`^${visible}=visible-value$`, 'm'));
+    assert.doesNotMatch(outcome.content[0]!.text, new RegExp(`^${absent}=`, 'm'));
+    assert.match(outcome.content[0]!.text, /^(HOME|PATH)=/m, 'the fixed host environment is still passed');
+  } finally {
+    if (previous === undefined) delete process.env[visible]; else process.env[visible] = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('task text cannot inject options or file arguments', async () => {
