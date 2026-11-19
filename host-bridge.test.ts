@@ -5,14 +5,21 @@ import { installHostBridge, HOST_TOOL, type HostExec } from './host-bridge.ts';
 import { canonicalPath, validateConfig, type Config, type HostCommand } from './policy.ts';
 import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
-const commands: HostCommand[] = [{
-  name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [
-    { name: 'run', argv: ['run', '--bg', '--name', '{name}', '--cwd', '{cwd}', 'pi', '-e', '{hiraishi}', '--hiraishi-grants', '{grants}', '{task}'] },
-    { name: 'send', argv: ['send', '{name}', '{task}'] },
-    { name: 'read', argv: ['read', '--lines', '{lines}', '{name}'] },
-    { name: 'list', argv: ['ls'] },
-  ],
-}];
+const commands: HostCommand[] = [
+  {
+    name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [
+      { name: 'run', argv: ['run', '--bg', '--name', '{name}', '--cwd', '{cwd}', 'pi', '-e', '{hiraishi}', '--hiraishi-grants', '{grants}', '{task}'] },
+      { name: 'send', argv: ['send', '{name}', '{task}'] },
+      { name: 'read', argv: ['read', '--lines', '{lines}', '{name}'] },
+      { name: 'list', argv: ['ls'] },
+    ],
+  },
+  {
+    name: 'itest', path: '/usr/bin/itest', delegable: true, operations: [
+      { name: 'run', argv: ['run', '{cwd}', '{task}'] },
+    ],
+  },
+];
 
 interface Harness {
   calls: { bin: string; args: string[]; timeout: number; env?: string[] }[]; ctx: ExtensionToolContext;
@@ -174,6 +181,67 @@ test('delegated children inherit the session denyRead and cannot delegate again'
     assert.deepEqual(new Set(child.denyRead), new Set([`${root}/docs/secret`]));
     assert.equal(child.cwd, `${root}/workspace`);
     assert.equal(child.noHostCommands, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('child denyRead can hide paths inside its workspace and missing paths are accepted', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const h = harness(commands, roots, { baseline, denyRead: [`${root}/docs/parent-secret`], ceiling: { networkMode: 'off', readOnly: [`${root}/docs`], readWrite: [`${root}/cache`] } });
+    const started = await h.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/workspace`, task: 't', grants: JSON.stringify({
+      denyRead: [`${root}/workspace/.env`, `${root}/workspace/missing`, `${root}/docs/child-secret`],
+    }) });
+    assert.equal(started.details.status, 'complete');
+    const child = JSON.parse(h.calls[0]!.args[10]!);
+    assert.deepEqual(new Set(child.denyRead), new Set([
+      `${root}/docs/parent-secret`, `${root}/workspace/.env`, `${root}/workspace/missing`, `${root}/docs/child-secret`,
+    ]));
+    assert.equal(child.cwd, `${root}/workspace`);
+    assert.equal('workspace' in child, false, 'the hosted child uses cwd as its workspace');
+    assert.deepEqual(child.replace.readOnly, [`${root}/docs`]);
+    assert.deepEqual(child.replace.readWrite, [`${root}/cache`]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('host children receive only delegable commands and cannot select hostCommands', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const configured = validateConfig({ ...baseline, hostCommands: commands });
+    const h = harness(commands, roots, { baseline: configured });
+    await h.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/workspace`, task: 't' });
+    const child = JSON.parse(h.calls[0]!.args[10]!);
+    assert.equal(child.noHostCommands, true);
+    assert.deepEqual(child.hostCommands, ['itest']);
+
+    const selected = await h.run({ command: 'hc', operation: 'run', name: 'fix2', cwd: `${root}/workspace`, task: 't', grants: JSON.stringify({ hostCommands: ['itest'] }) });
+    assert.equal(selected.details.status, 'blocked');
+    assert.match(selected.content[0]!.text, /hostCommands cannot be selected/);
+    assert.equal(h.calls.length, 1);
+
+    const plain = harness([commands[0]!], roots, { baseline: configured });
+    await plain.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/workspace`, task: 't' });
+    const noDelegable = JSON.parse(plain.calls[0]!.args[10]!);
+    assert.equal(noDelegable.noHostCommands, true);
+    assert.equal(noDelegable.hostCommands, undefined);
+
+    const childSession = harness([commands[1]!], roots, { baseline: configured });
+    const grandchild = await childSession.run({ command: 'hc', operation: 'run', name: 'grand', cwd: `${root}/workspace`, task: 't' });
+    assert.equal(grandchild.details.status, 'blocked');
+    assert.match(grandchild.content[0]!.text, /Unknown host command hc/);
+    assert.equal(childSession.calls.length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a delegable command that can start another child is not passed further', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const leaking: HostCommand = { name: 'leak', path: '/usr/bin/leak', delegable: true, operations: [{ name: 'run', argv: ['run', '{hiraishi}', '{grants}'] }] };
+    const configured = validateConfig({ ...baseline, hostCommands: commands });
+    const h = harness([...commands, leaking], roots, { baseline: configured });
+    await h.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/workspace`, task: 't' });
+    const child = JSON.parse(h.calls[0]!.args[10]!);
+    assert.deepEqual(child.hostCommands, ['itest']);
+    assert(!child.hostCommands.includes('leak'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -8,7 +8,7 @@ export type NetworkMode = 'off' | 'http-get' | 'http-all';
 export type HostPlaceholder = '{name}' | '{cwd}' | '{task}' | '{grants}' | '{lines}' | '{timeout}' | '{hiraishi}';
 export const hostPlaceholders: readonly HostPlaceholder[] = ['{name}', '{cwd}', '{task}', '{grants}', '{lines}', '{timeout}', '{hiraishi}'];
 export interface HostOperation { name: string; argv: string[]; timeoutSeconds?: number }
-export interface HostCommand { name: string; path: string; starts?: string; env?: string[]; operations: HostOperation[] }
+export interface HostCommand { name: string; path: string; starts?: string; env?: string[]; delegable?: boolean; operations: HostOperation[] }
 export interface Config {
   networkMode: NetworkMode;
   maxNetworkMode: NetworkMode;
@@ -32,6 +32,18 @@ export function canonicalPath(path: string): string {
     if ((code !== 'ENOENT' && code !== 'ENAMETOOLONG') || dirname(absolute) === absolute) throw error;
     return join(canonicalPath(dirname(absolute)), basename(absolute));
   }
+}
+const isLiteralAbsolute = (path: string) => path.length <= 4096 && !/[\x00-\x1f\x7f*?[\]{}]/.test(path);
+export const isWorkspacePath = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value) && isLiteralAbsolute(value);
+// The workspace is both the child cwd and its default read/write root, so it must resolve inside the parent cwd.
+export function validateWorkspace(value: unknown, root: string): string {
+  if (!isWorkspacePath(value)) throw new Error('Invalid workspace: use a literal absolute path');
+  const canonical = canonicalPath(value);
+  let directory = false;
+  try { directory = statSync(canonical).isDirectory(); } catch { directory = false; }
+  if (!directory) throw new Error(`Invalid workspace: not an existing directory: ${value}`);
+  if (!within(canonical, canonicalPath(root))) throw new Error(`Invalid workspace: ${value} is outside the parent working directory`);
+  return canonical;
 }
 const overlaps = (a: string, b: string) => within(a, b) || within(b, a);
 const literal = (path: string) => ({ path, literal: true as const });
@@ -71,12 +83,14 @@ function validateHostCommands(value: unknown): HostCommand[] {
   return value.map((entry): HostCommand => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Invalid hostCommands entry');
     const command = entry as Record<string, unknown>;
-    if (Object.keys(command).some(key => !['name', 'path', 'starts', 'env', 'operations'].includes(key))) throw new Error('Invalid hostCommands entry');
+    if (Object.keys(command).some(key => !['name', 'path', 'starts', 'env', 'delegable', 'operations'].includes(key))) throw new Error('Invalid hostCommands entry');
     if (typeof command.name !== 'string' || !hostName.test(command.name)) throw new Error('Invalid hostCommands name: use 1-64 of a-z, 0-9, - or _');
     if (seen.has(command.name)) throw new Error(`Duplicate hostCommands name: ${command.name}`);
     seen.add(command.name);
     if (typeof command.path !== 'string' || !isAbsolute(command.path) || /[\x00-\x1f\x7f]/.test(command.path)) throw new Error('Invalid hostCommands path: use an absolute path');
     if (command.starts !== undefined && (typeof command.starts !== 'string' || !hostName.test(command.starts))) throw new Error('Invalid hostCommands starts');
+    if (command.delegable !== undefined && typeof command.delegable !== 'boolean') throw new Error('Invalid hostCommands delegable: use a boolean');
+    if (command.delegable === true && command.starts !== undefined) throw new Error(`hostCommands ${command.name} cannot be delegable and start another child`);
     if (command.env !== undefined && (!Array.isArray(command.env) || command.env.length > 32 || command.env.some(name => typeof name !== 'string' || !hostEnvName.test(name))))
       throw new Error('Invalid hostCommands env: use up to 32 environment variable names matching [A-Za-z_][A-Za-z0-9_]*');
     if (!Array.isArray(command.operations) || !command.operations.length || command.operations.length > 32) throw new Error('Invalid hostCommands operations: expected 1-32 entries');
@@ -94,6 +108,8 @@ function validateHostCommands(value: unknown): HostCommand[] {
         if (/[{}]/.test(arg) && !/^\{[a-z]+\}$/.test(arg)) throw new Error(`Invalid hostCommands argument: placeholders must fill the whole argument (${arg})`);
         const placeholders = arg.match(/\{[a-z]+\}/g) ?? [];
         if (placeholders.some(name => !hostPlaceholderSet.has(name))) throw new Error(`Invalid hostCommands placeholder in ${arg}`);
+        if (command.delegable === true && placeholders.some(name => name === '{hiraishi}' || name === '{grants}'))
+          throw new Error(`hostCommands ${command.name} is delegable and cannot use {hiraishi} or {grants}`);
       }
       if (command.starts === operation.name && !(operation.argv as string[]).includes('{grants}')) throw new Error('hostCommands starts must pass {grants} so the child cannot bypass the session ceiling');
       if ((operation.argv as string[]).includes('{hiraishi}') && !(operation.argv as string[]).includes('{grants}'))
@@ -103,7 +119,7 @@ function validateHostCommands(value: unknown): HostCommand[] {
       return { name: operation.name, argv: operation.argv as string[], ...(timeoutSeconds !== undefined ? { timeoutSeconds: timeoutSeconds as number } : {}) };
     });
     if (command.starts !== undefined && !names.has(command.starts as string)) throw new Error('hostCommands starts must name an operation');
-    return { name: command.name, path: command.path, ...(command.starts !== undefined ? { starts: command.starts as string } : {}), ...(command.env !== undefined ? { env: [...new Set(command.env as string[])] } : {}), operations };
+    return { name: command.name, path: command.path, ...(command.starts !== undefined ? { starts: command.starts as string } : {}), ...(command.env !== undefined ? { env: [...new Set(command.env as string[])] } : {}), ...(command.delegable === true ? { delegable: true } : {}), operations };
   });
 }
 export function loadConfig(path: string): Config {
@@ -112,6 +128,7 @@ export function loadConfig(path: string): Config {
 }
 
 export type Grants = Partial<Pick<Config, 'networkMode' | 'maxNetworkMode' | 'readOnly' | 'readWrite' | 'denyRead'>> & {
+  hostCommands?: string[];
   replace?: Partial<Pick<Config, 'readOnly' | 'readWrite'>>;
   /** Canonical workspace the child must start in; the child verifies it itself. */
   expectedCwd?: string;
@@ -138,11 +155,13 @@ export function parseGrants(json: string): Grants {
   catch { throw new Error('Invalid --hiraishi-grants: not valid JSON'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid --hiraishi-grants: expected a JSON object');
   const raw = value as Record<string, unknown>;
-  if ('socatPath' in raw || 'hostCommands' in raw) throw new Error('Invalid --hiraishi-grants: host-side commands and socatPath cannot be set from the command line');
+  if ('socatPath' in raw) throw new Error('Invalid --hiraishi-grants: socatPath cannot be set from the command line');
   if ('maxReadOnly' in raw || 'maxReadWrite' in raw) throw new Error('Invalid --hiraishi-grants: maxReadOnly and maxReadWrite are configuration-only ceilings');
-  const { replace, cwd: expectedCwd, noHostCommands, ...rest } = raw;
+  const { replace, cwd: expectedCwd, noHostCommands, hostCommands, ...rest } = raw;
   if (expectedCwd !== undefined && (typeof expectedCwd !== 'string' || !isAbsolute(expectedCwd))) throw new Error('Invalid --hiraishi-grants: cwd must be an absolute path');
   if (noHostCommands !== undefined && typeof noHostCommands !== 'boolean') throw new Error('Invalid --hiraishi-grants: noHostCommands must be a boolean');
+  if (hostCommands !== undefined && (!Array.isArray(hostCommands) || hostCommands.length > 16 || hostCommands.some(name => typeof name !== 'string' || !hostName.test(name))))
+    throw new Error('Invalid --hiraishi-grants: hostCommands must be an array of configured command names');
   for (const name of ['readOnly', 'readWrite', 'denyRead'] as const) if (name in rest) pathList(rest[name], name);
   const config = validateConfig(rest);
   const grants: Grants = {};
@@ -153,6 +172,7 @@ export function parseGrants(json: string): Grants {
   if ('denyRead' in rest) grants.denyRead = config.denyRead;
   if (expectedCwd !== undefined) grants.expectedCwd = canonicalPath(expectedCwd);
   if (noHostCommands !== undefined) grants.noHostCommands = noHostCommands;
+  if (hostCommands !== undefined) grants.hostCommands = [...new Set(hostCommands as string[])];
   if (grants.networkMode && grants.maxNetworkMode && networkRank(grants.networkMode) > networkRank(grants.maxNetworkMode))
     throw new Error('Invalid --hiraishi-grants: networkMode cannot exceed maxNetworkMode');
   if (replace !== undefined) {
@@ -199,6 +219,7 @@ export function canonicalGrants(grants: Grants): Grants {
     ...(grants.readOnly ? { readOnly: grants.readOnly.map(canonicalPath) } : {}),
     ...(grants.readWrite ? { readWrite: grants.readWrite.map(canonicalPath) } : {}),
     ...(grants.denyRead ? { denyRead: grants.denyRead.map(canonicalPath) } : {}),
+    ...(grants.hostCommands ? { hostCommands: [...new Set(grants.hostCommands)] } : {}),
     ...(grants.expectedCwd ? { cwd: canonicalPath(grants.expectedCwd) } : {}),
     ...(grants.noHostCommands ? { noHostCommands: grants.noHostCommands } : {}),
     ...(exact ? { replace: {
@@ -206,6 +227,22 @@ export function canonicalGrants(grants: Grants): Grants {
       ...(exact.readWrite ? { readWrite: exact.readWrite.map(canonicalPath) } : {}),
     } } : {}),
   };
+}
+
+// A host command keep-list may only name configured commands, and never one that starts another child.
+function selectHostCommands(baseline: Config, grants: Grants): HostCommand[] | undefined {
+  const requested = grants.hostCommands;
+  if (requested !== undefined) {
+    const configured = new Map((baseline.hostCommands ?? []).map(command => [command.name, command]));
+    const names = [...new Set(requested)];
+    for (const name of names) {
+      const command = configured.get(name);
+      if (!command) throw new Error(`Invalid --hiraishi-grants: unknown host command ${name}`);
+      if (command.starts) throw new Error(`Invalid --hiraishi-grants: host command ${name} starts another child and cannot be delegated`);
+    }
+    return names.length ? names.map(name => configured.get(name)!) : undefined;
+  }
+  return grants.noHostCommands ? undefined : baseline.hostCommands;
 }
 
 // Unspecified fields inherit the baseline. Directory grants are additive unless replace names them explicitly;
@@ -216,6 +253,7 @@ export function mergeGrants(baseline: Config, grants: Grants): Config {
   const unique = (paths: string[]) => [...new Set(paths.map(canonicalPath))];
   const ceiling = grants.maxNetworkMode ?? grants.networkMode ?? baseline.maxNetworkMode;
   const start = grants.networkMode ?? baseline.networkMode;
+  const hostCommands = selectHostCommands(baseline, grants);
   return {
     networkMode: networkRank(start) <= networkRank(ceiling) ? start : ceiling,
     maxNetworkMode: ceiling,
@@ -226,7 +264,7 @@ export function mergeGrants(baseline: Config, grants: Grants): Config {
     maxReadWrite: grants.noHostCommands ? [] : unique(baseline.maxReadWrite),
     denyRead: unique([...baseline.denyRead, ...(grants.denyRead ?? [])]),
     socatPath: baseline.socatPath,
-    ...(!grants.noHostCommands && baseline.hostCommands ? { hostCommands: baseline.hostCommands } : {}),
+    ...(hostCommands ? { hostCommands } : {}),
   };
 }
 // "Start with baseline" keeps every restriction the request asked for while dropping its additions.
@@ -238,6 +276,7 @@ export function restrictGrants(baseline: Config, grants: Grants): Config {
   return mergeGrants({ ...baseline, maxNetworkMode: lowered }, {
     ...(replace ? { replace } : {}),
     ...(grants.denyRead ? { denyRead: grants.denyRead } : {}),
+    ...(grants.hostCommands ? { hostCommands: grants.hostCommands } : {}),
     ...(grants.noHostCommands ? { noHostCommands: true } : {}),
   });
 }

@@ -27,9 +27,9 @@ const parameters = {
     command: { type: 'string', description: 'Configured host command name (hostCommands in the Hiraishi configuration).' },
     operation: { type: 'string', description: 'Configured operation of that command.' },
     name: { type: 'string', description: 'Child name for operations that take {name}: 1-32 of a-z, 0-9, - or _.' },
-    cwd: { type: 'string', description: 'Existing directory for {cwd}. It becomes the child workspace. It must stay inside this session workspace, its write grants, or the configured write ceiling; otherwise the user is asked to approve it.' },
+    cwd: { type: 'string', description: 'Existing directory for {cwd}. It becomes the child workspace and its default read/write root, so point it at a subdirectory to narrow the child. It must stay inside this session workspace, its write grants, or the configured write ceiling; otherwise the user is asked to approve it.' },
     task: { type: 'string', maxLength: textLimit, description: 'Text for {task}. It cannot begin with - or @, which the started program could read as an option or file argument.' },
-    grants: { type: 'string', description: 'Optional JSON permissions for {grants}, same shape as --hiraishi-grants. They are checked and then tightened against the session ceiling before the child starts.' },
+    grants: { type: 'string', description: 'Optional JSON permissions for {grants}, same shape as --hiraishi-grants except hostCommands. denyRead hides extra child paths, including paths inside the child workspace, and is unioned with the session denyRead. Commands marked delegable in the configuration are passed to the child automatically; hostCommands in this JSON is refused. Grants are checked and then tightened against the session ceiling before the child starts.' },
     lines: { type: 'integer', minimum: 0, maximum: 2000, description: 'Value for {lines}.' },
     timeoutSeconds: { type: 'integer', minimum: 1, maximum: 300, description: 'Wall-clock limit for the call; also substitutes {timeout}.' },
   },
@@ -76,7 +76,11 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
   // The child reads its own config baseline, so every delegated grant is intersected with it and rewritten as an exact
   // set. That keeps the child inside this session even when the caller used replace, and it never widens the ceiling.
   const childGrants = (requested: Grants | undefined, scope: HostScope, request: Request) => {
+    if (requested?.hostCommands !== undefined)
+      throw new Error('Invalid {grants}: hostCommands cannot be selected by the caller; only commands marked delegable in the configuration are passed to a child.');
     const baseline = options.baseline();
+    const delegable = options.commands().filter(command => command.delegable === true && command.starts === undefined &&
+      command.operations.every(operation => operation.argv.every(arg => !arg.includes('{hiraishi}') && !arg.includes('{grants}')))).map(command => command.name);
     const delegate = (name: 'readOnly' | 'readWrite') => {
       const wanted = [...new Set([...(requested?.[name] ?? []), ...(requested?.replace?.[name] ?? [])].map(canonicalPath))];
       for (const path of wanted)
@@ -95,6 +99,7 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
       denyRead: unique([...baseline.denyRead, ...scope.denyRead, ...(requested?.denyRead ?? [])]),
       cwd: canonicalPath(request.cwd ?? scope.writable[0]!),
       noHostCommands: true,
+      ...(delegable.length ? { hostCommands: delegable } : {}),
     });
   };
 
@@ -168,8 +173,8 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
 
   pi.registerTool({
     name: HOST_TOOL, label: 'Host command', parameters, executionMode: 'sequential',
-    description: 'Run a host command that the Hiraishi configuration explicitly allows, with fixed argv templates. Each operation maps typed arguments onto placeholders such as {name}, {cwd} or {grants}; the model cannot choose the binary, add flags or use a shell, and task text cannot start with - or @. Every child grant is rewritten against this session ceiling before the child starts. When nothing is configured this tool reports that no host commands are available.',
-    promptGuidelines: ['Use hiraishi_host only for the operations the configuration lists; bash cannot reach host-only tools from inside the sandbox. Pass cwd per task so each child gets its own workspace; it must be writable in this session or covered by the configured write ceiling. Keep grants within the session ceiling. Read results back with the configured read operation.'],
+    description: 'Run a host command that the Hiraishi configuration explicitly allows, with fixed argv templates. Each operation maps typed arguments onto placeholders such as {name}, {cwd} or {grants}; the model cannot choose the binary, add flags or use a shell, and task text cannot start with - or @. {cwd} is the child workspace and its default read/write root. Every child grant is rewritten against this session ceiling before the child starts. When nothing is configured this tool reports that no host commands are available.',
+    promptGuidelines: ['Use hiraishi_host only for the operations the configuration lists; bash cannot reach host-only tools from inside the sandbox. Pass cwd per task so each child gets its own workspace; it must be writable in this session or covered by the configured write ceiling. Point cwd at a subdirectory to narrow a child. Keep grants within the session ceiling. Only commands marked delegable in the configuration are passed to a child; do not put hostCommands in grants. Add denyRead to grants to hide specific paths from that child, including paths inside its workspace; it is unioned with the session denies. Avoid hiding files the child needs. Read results back with the configured read operation.'],
     reachesTools: () => [],
     async execute(_id, input, signal, _onUpdate, ctx) {
       if (!owns(pi.getAllTools().find(tool => tool.name === HOST_TOOL))) throw new Error('Hiraishi host bridge was replaced; execution refused');

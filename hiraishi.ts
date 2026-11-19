@@ -35,11 +35,15 @@ export default function hiraishi(pi: ExtensionAPI) {
   const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}${session.ceilingMode !== session.mode ? `/max:${session.ceilingMode}` : ''}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
   pi.registerFlag('hiraishi-grants', {
     type: 'string',
-    description: `JSON session permissions granted by the caller, e.g. '{"networkMode":"http-get","maxNetworkMode":"http-get","readOnly":["/docs"],"replace":{"readOnly":["/docs"]},"denyRead":["/project/.env"]}'. Directory grants are additive; replace drops baseline directories explicitly; denyRead only grows; maxNetworkMode lowers the session ceiling. cwd pins the expected workspace and noHostCommands drops host commands for delegated work. Requests beyond maxNetworkMode ask the user in interactive sessions and refuse the session otherwise. The configuration's maxReadOnly and maxReadWrite raise the path ceiling without adding grants.`,
+    description: `JSON session permissions granted by the caller, e.g. '{"networkMode":"http-get","maxNetworkMode":"http-get","readOnly":["/docs"],"replace":{"readOnly":["/docs"]},"denyRead":["/project/.env"]}'. Directory grants are additive; replace drops baseline directories explicitly; denyRead only grows; maxNetworkMode lowers the session ceiling. cwd pins the expected workspace; noHostCommands drops host commands for delegated work, and hostCommands lists configured command names to keep (with noHostCommands, only those remain). Requests beyond maxNetworkMode ask the user in interactive sessions and refuse the session otherwise. The configuration's maxReadOnly and maxReadWrite raise the path ceiling without adding grants.`,
   });
   const clean = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
   let refused = false;
   const resolveGrants = async (ctx: ExtensionContext, baseline: Config): Promise<Config> => {
+    const mergeResolvedGrants = (grants: ReturnType<typeof parseGrants>): Config => {
+      try { return mergeGrants(baseline, grants); }
+      catch (error) { refused = !ctx.hasUI; throw error; }
+    };
     const raw = pi.getFlag('hiraishi-grants');
     if (typeof raw !== 'string' || !raw.trim()) return baseline;
     let grants;
@@ -50,7 +54,7 @@ export default function hiraishi(pi: ExtensionAPI) {
       throw new Error(`Working directory changed since this child was launched: expected ${grants.expectedCwd}`);
     }
     const violations = ceilingViolations(grants, ceilingOf(baseline));
-    if (!violations.length) return mergeGrants(baseline, grants);
+    if (!violations.length) return mergeResolvedGrants(grants);
     // A caller that cannot ask the user must not get a session at all.
     refused = true;
     if (!ctx.hasUI) throw new Error(`Requested Hiraishi permissions exceed the session ceiling and no interactive UI is available to approve them: ${violations.join('; ')}`);
@@ -58,7 +62,7 @@ export default function hiraishi(pi: ExtensionAPI) {
     const listed = violations.slice(0, 10).map(v => `- ${clean(v)}`).join('\n') + (violations.length > 10 ? `\n… ${violations.length - 10} more` : '');
     const choice = await ctx.ui.select(`Hiraishi permission request exceeds the session ceiling (maxNetworkMode: ${baseline.maxNetworkMode})\nRequested: ${requested}\nViolations:\n${listed}`,
       ['Allow requested permissions', 'Start with baseline permissions', 'Refuse to start']);
-    if (choice === 'Allow requested permissions') return mergeGrants(baseline, grants);
+    if (choice === 'Allow requested permissions') return mergeResolvedGrants(grants);
     if (choice === 'Start with baseline permissions') return restrictGrants(baseline, grants);
     refused = true;
     throw new Error('Hiraishi permission request refused by the user');
@@ -80,7 +84,9 @@ export default function hiraishi(pi: ExtensionAPI) {
       const active = current(ctx); const epoch = active.epoch;
       if (!owns(definition.name)) throw new Error('Hiraishi tool was replaced; execution refused');
       let networkDenied = false;
-      const result = await definitionFor(definition.name, active, ctx.cwd, signal, () => { networkDenied = true; }).execute(id, input as never, signal, onUpdate as never, ctx);
+      // Tool definitions resolve relative paths from ctx.cwd, so a subagent workspace must replace it here.
+      const toolContext = active.cwd === ctx.cwd ? ctx : { ...ctx, cwd: active.cwd };
+      const result = await definitionFor(definition.name, active, active.cwd, signal, () => { networkDenied = true; }).execute(id, input as never, signal, onUpdate as never, toolContext);
       active.assertEpoch(epoch);
       if (active !== current(ctx)) throw new Error('Session changed; discard this result');
       return networkDenied ? { ...result, details: { ...result.details, networkDenied: true } } : result;
@@ -89,7 +95,7 @@ export default function hiraishi(pi: ExtensionAPI) {
   const subagent = installSubagent(pi, ctx => {
     const parent = current(ctx), epoch = parent.epoch;
     return () => parent === session && parent.status === 'ready' && parent.epoch === epoch;
-  }, (ctx, permissions, signal) => children.open(current(ctx), ctx, permissions, signal),
+  }, (ctx, permissions, signal, workspaceCwd) => children.open(current(ctx), ctx, permissions, signal, workspaceCwd),
   ctx => ceilingOf(current(ctx).config, current(ctx).cwd));
   const bridge = installHostBridge(pi, {
     hiraishiPath: sourcePath,

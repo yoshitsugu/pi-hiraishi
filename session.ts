@@ -105,6 +105,8 @@ export class SandboxSession {
     }
   }
   private async launch(mode: NetworkMode) {
+    const resolved = realpathSync(this.cwd);
+    if (resolved !== this.cwd) throw new Error(`Working directory does not resolve to itself: ${this.cwd} (resolves to ${resolved})`);
     this.directory = mkdtempSync(join(tmpdir(), 'hiraishi-'));
     const temp = join(this.directory, 'work'); const home = join(this.directory, 'home'); const runtime = join(this.directory, 'runtime');
     for (const p of [temp, home, runtime]) mkdirSync(p, { mode: 0o700 });
@@ -150,7 +152,7 @@ export class SandboxSession {
         if (message.type === 'data') p.onData?.(Buffer.from(message.data, 'base64'));
         else { this.pending.delete(message.id); p.cleanup(); message.error ? p.reject(new Error(message.error)) : p.resolve(message); }
       });
-      child.send({ cwd: realpathSync(this.cwd), configPath: this.configPath, config: this.config, mode, runtimeRoot: root, temp, home, agentDir: this.agentDir, delegated: this.delegated });
+      child.send({ cwd: this.cwd, configPath: this.configPath, config: this.config, mode, runtimeRoot: root, temp, home, agentDir: this.agentDir, delegated: this.delegated });
     });
   }
   private killToolProcesses() {

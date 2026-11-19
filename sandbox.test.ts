@@ -51,6 +51,18 @@ integration('SRT confines read/write/edit/bash, child processes, secrets, and sh
     assert.equal(readFileSync(`${f.root}/outside/secret`,'utf8'),'outside fixture');
   } finally { await f.cleanup();rmSync(shared,{recursive:true,force:true});if(previousSecret===undefined)delete process.env.HIRAISHI_FIXTURE_SECRET;else process.env.HIRAISHI_FIXTURE_SECRET=previousSecret; }
 });
+integration('a canonical cwd starts while a symlinked cwd is refused', async () => {
+  const f = await fixture();
+  const linked = new SandboxSession(`${f.root}/project/link`, `${f.root}/config.json`, validateConfig({ ...(socatPath ? { socatPath } : {}) }), f.session.agentDir);
+  try {
+    assert.equal(f.session.status, 'ready');
+    await assert.rejects(linked.start(), /does not resolve to itself/);
+    assert.equal(linked.status, 'failed');
+  } finally {
+    await linked.stop();
+    await f.cleanup();
+  }
+});
 integration('mode changes reject in-flight calls and stale multi-step edit operations', async () => {
   const f=await fixture();
   try {
@@ -297,6 +309,87 @@ integration('subagents enforce independent defaults, explicit grants and inherit
   }
 });
 
+integration('subagent workspace limits reads, writes and shell and unions denyRead', async () => {
+  const f = await fixture();
+  mkdirSync(`${f.root}/project/sub`);
+  mkdirSync(`${f.root}/project/other`);
+  writeFileSync(`${f.root}/project/root.txt`, 'root');
+  writeFileSync(`${f.root}/project/sub/inside.txt`, 'inside');
+  writeFileSync(`${f.root}/project/sub/.child-secret`, 'child secret');
+  writeFileSync(`${f.root}/project/.parent-secret`, 'parent secret');
+  writeFileSync(`${f.root}/project/other/sibling.txt`, 'sibling');
+  symlinkSync(`${f.root}/outside`, `${f.root}/project/sub/escape`);
+  const parent = new SandboxSession(f.session.cwd, `${f.root}/config.json`, validateConfig({
+    ...f.session.config, networkMode: 'off', denyRead: [`${f.root}/project/.parent-secret`],
+  }));
+  const children = new SubagentSandboxes();
+  const ctx = { executeTool: async (name: string, args: any) => {
+    const active = children.current(parent);
+    const op = createOperations(active);
+    if (name === 'read') {
+      const data = await op.read.readFile(args.path);
+      return { isError: false, result: { content: [{ type: 'text', text: data.toString() }], details: {} } };
+    }
+    if (name === 'bash') {
+      let output = '';
+      const result = await op.bash.exec(args.command, active.cwd, { timeout: 5, onData: data => { output += data.toString(); } });
+      return { isError: result.exitCode !== 0, result: { content: [{ type: 'text', text: output }], details: {} } };
+    }
+    throw new Error(`Unexpected child tool: ${name}`);
+  } } as unknown as ExtensionToolContext;
+  try {
+    await parent.start();
+    const child = await children.open(parent, ctx, {
+      networkMode: 'off', readOnly: [], readWrite: [],
+      workspace: `${f.root}/project/sub`, denyRead: [`${f.root}/project/sub/.child-secret`],
+    }, new AbortController().signal);
+    const inside = await child.executeTool('read', { path: `${f.root}/project/sub/inside.txt` });
+    assert.equal((inside.result.content[0] as any).text, 'inside');
+    for (const path of [
+      `${f.root}/project/root.txt`, `${f.root}/project/other/sibling.txt`, `${f.root}/project/.parent-secret`,
+      `${f.root}/project/sub/.child-secret`, `${f.root}/project/sub/escape/secret`, `${f.root}/outside/secret`,
+    ]) await assert.rejects(child.executeTool('read', { path }), /./, path);
+    const shell = await child.executeTool('bash', { command: 'pwd; printf yes > created.txt' });
+    assert.equal(shell.isError, false);
+    assert.equal((shell.result.content[0] as any).text.trim(), `${f.root}/project/sub`);
+    assert.equal(readFileSync(`${f.root}/project/sub/created.txt`, 'utf8'), 'yes');
+    const denied = await child.executeTool('bash', { command: `printf no > '${f.root}/project/root.txt'` });
+    // SRT's read-deny tmpfs can absorb this write and still exit 0; the host file must stay intact.
+    assert.equal(readFileSync(`${f.root}/project/root.txt`, 'utf8'), 'root', JSON.stringify(denied));
+    assert.equal((await createOperations(parent).read.readFile(`${f.root}/project/root.txt`)).toString(), 'root');
+    await child.close();
+  } finally {
+    await children.stop();
+    await parent.stop();
+    await f.cleanup();
+  }
+});
+
+integration('host-style child grants hide nested paths while cwd is the child workspace', async () => {
+  const f = await fixture();
+  mkdirSync(`${f.root}/project/sub`);
+  mkdirSync(`${f.root}/project/other`);
+  writeFileSync(`${f.root}/project/sub/ok`, 'ok');
+  writeFileSync(`${f.root}/project/sub/.env`, 'synthetic private value');
+  writeFileSync(`${f.root}/project/root.txt`, 'root');
+  writeFileSync(`${f.root}/project/other/ref`, 'reference');
+  const child = new SandboxSession(`${f.root}/project/sub`, `${f.root}/config.json`, validateConfig({
+    networkMode: 'off', maxNetworkMode: 'off', readOnly: [`${f.root}/project/other`], readWrite: [],
+    denyRead: [`${f.root}/project/sub/.env`],
+  }), f.session.agentDir, true);
+  try {
+    await child.start();
+    const op = createOperations(child);
+    assert.equal((await op.read.readFile(`${f.root}/project/sub/ok`)).toString(), 'ok');
+    await assert.rejects(op.read.readFile(`${f.root}/project/sub/.env`));
+    await assert.rejects(op.read.readFile(`${f.root}/project/root.txt`));
+    assert.equal((await op.read.readFile(`${f.root}/project/other/ref`)).toString(), 'reference');
+  } finally {
+    await child.stop();
+    await f.cleanup();
+  }
+});
+
 
 integration('pi nested tool pipeline routes registered adapters to child sandboxes', async () => {
   const { default: extension } = await import('./hiraishi.ts');
@@ -305,7 +398,9 @@ integration('pi nested tool pipeline routes registered adapters to child sandbox
   const { runToolCall } = await import('@earendil-works/pi-agent-core');
   const root = mkdtempSync('/tmp/hiraishi-nested-');
   mkdirSync(`${root}/project`);
+  mkdirSync(`${root}/project/sub`);
   mkdirSync(`${root}/reference`);
+  writeFileSync(`${root}/project/sub/inside`, 'inside');
   writeFileSync(`${root}/reference/sample`, 'reference');
   const previous = process.env.HIRAISHI_CONFIG;
   process.env.HIRAISHI_CONFIG = `${root}/config`;
@@ -356,6 +451,12 @@ integration('pi nested tool pipeline routes registered adapters to child sandbox
     const grantedRead = requests.at(-1).messages.find((message: any) => message.role === 'toolResult');
     assert.equal(grantedRead.isError, false);
     assert.match(JSON.stringify(grantedRead.content), /reference/);
+    responses.push(childCall('read', { path: 'inside' }), assistant([{ type: 'text', text: 'Read inside.' }]));
+    const confined = await invoke({ task: 'Read inside.', permissions: { workspace: `${root}/project/sub`, reason: 'Confine this child to the subdirectory.' } });
+    assert.equal((confined.result.details as any).status, 'complete', JSON.stringify(confined));
+    const confinedRead = requests.at(-1).messages.find((message: any) => message.role === 'toolResult');
+    assert.equal(confinedRead.isError, false);
+    assert.match(JSON.stringify(confinedRead.content), /inside/);
     responses.push(childCall('bash', { command: 'curl -sS --max-time 5 https://example.com; true' }));
     const denied = await invoke({ task: 'Read docs.', mode: 'work' });
     assert.equal((denied.result.details as any).status, 'blocked');

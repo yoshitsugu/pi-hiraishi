@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { installSubagent, runSubagent as executeSubagent } from './subagent.ts';
 import type { OpenSubagentSandbox } from './subagent-sandbox.ts';
-import { ceilingOf, validateConfig } from './policy.ts';
+import { ceilingOf, expand, validateConfig } from './policy.ts';
 import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
 const open: OpenSubagentSandbox = async ctx => ({ executeTool: (...args) => ctx.executeTool(...args), close: async () => {} });
@@ -120,6 +121,54 @@ test('cancellation and deadline settle even if a provider ignores its abort sign
   assert.equal(timeout.forwarded.length, 0);
 });
 
+test('child-only denyRead and workspace narrow the child without approval', async () => {
+  const root = mkdtempSync('/tmp/hiraishi-subagent-workspace-');
+  mkdirSync(`${root}/project/sub`, { recursive: true });
+  try {
+    const h = harness([response([text('Done.')])]);
+    (h.ctx as any).cwd = `${root}/project`;
+    let received: any;
+    h.ctx.hasUI = true;
+    h.ctx.ui = { select: async () => { throw new Error('Narrowing permissions must not ask the user'); } } as any;
+    const result = await executeSubagent({ task: 'Review.', permissions: {
+      denyRead: ['~/secrets', `${root}/project/.env`], workspace: `${root}/project/sub`, reason: 'Keep secrets and unrelated code out of this review.' } },
+      h.ctx, () => true, undefined, async (ctx, permissions) => {
+        received = permissions;
+        return { executeTool: ctx.executeTool, close: async () => {} };
+      }, () => ({ networkMode: 'off' as const, readOnly: [], readWrite: [] }));
+    assert.equal(result.details.status, 'complete');
+    assert.equal(received.workspace, `${root}/project/sub`);
+    assert.deepEqual(received.denyRead, [expand('~/secrets'), `${root}/project/.env`]);
+    assert(h.requests[0]!.context.systemPrompt.includes(`${root}/project/sub`));
+    assert(h.requests[0]!.context.systemPrompt.includes(`"workspace":${JSON.stringify(`${root}/project/sub`)}`));
+    assert.match(h.requests[0]!.context.systemPrompt, /"denyRead"/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('declining a widening request keeps the narrowing permissions', async () => {
+  const root = mkdtempSync('/tmp/hiraishi-subagent-decline-');
+  mkdirSync(`${root}/project/sub`, { recursive: true });
+  try {
+    const h = harness([response([text('Done.')])]);
+    (h.ctx as any).cwd = `${root}/project`;
+    let received: any;
+    h.ctx.hasUI = true;
+    h.ctx.ui = { select: async (title: string) => {
+      assert.match(title, /Workspace: /);
+      assert.match(title, /Deny read: /);
+      return 'Run with default permissions';
+    } } as any;
+    const result = await executeSubagent({ task: 'Review.', permissions: {
+      networkMode: 'http-all', denyRead: [`${root}/project/.env`], workspace: `${root}/project/sub`, approval: 'user', reason: 'Widen network but keep secrets hidden.' } },
+      h.ctx, () => true, undefined, async (ctx, permissions) => {
+        received = permissions;
+        return { executeTool: ctx.executeTool, close: async () => {} };
+      }, () => ({ networkMode: 'http-get' as const, readOnly: [], readWrite: [] }));
+    assert.equal(result.details.status, 'complete');
+    assert.deepEqual(received, { networkMode: 'off', readOnly: [], readWrite: [], denyRead: [`${root}/project/.env`], workspace: `${root}/project/sub` });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('provider failures, missing models, bad requests and tool-call limits fail without fallback', async () => {
   const h = harness([() => { throw new Error('provider unavailable'); }]);
   assert.equal((await runSubagent({ task: 'Review.' }, h.ctx, () => true)).details.status, 'failed');
@@ -210,7 +259,7 @@ test('child starts with minimal permissions and only receives explicit parent gr
     assert.equal(closed, 1);
   }
   const h = harness([]);
-  for (const permissions of [null, [], {}, { reason: '' }, { reason: 'x', approval: 'automatic' }, { reason: 'x', networkMode: 'all' }, { reason: 'x', readOnly: ['relative'] }, { reason: 'x', denyRead: [] }])
+  for (const permissions of [null, [], {}, { reason: '' }, { reason: 'x', approval: 'automatic' }, { reason: 'x', networkMode: 'all' }, { reason: 'x', readOnly: ['relative'] }, { reason: 'x', denyRead: 'not-an-array' }, { reason: 'x', workspace: 'relative' }, { reason: 'x', workspace: '/tmp/*' }])
     await assert.rejects(runSubagent({ task: 'Review.', permissions }, h.ctx, () => true));
   assert.equal((await executeSubagent({ task: 'Review.' }, h.ctx, () => true, undefined, undefined, wide)).details.status, 'unavailable');
 });

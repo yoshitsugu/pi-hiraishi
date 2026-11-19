@@ -1,10 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
-import { validateConfig, type Config } from './policy.ts';
+import { validateConfig, validateWorkspace, type Config } from './policy.ts';
 import { SandboxSession } from './session.ts';
 
-export type SubagentPermissions = Pick<Config, 'networkMode' | 'readOnly' | 'readWrite'>;
-export type OpenSubagentSandbox = (ctx: ExtensionToolContext, permissions: SubagentPermissions, signal: AbortSignal) => Promise<{
+export type SubagentPermissions = Pick<Config, 'networkMode' | 'readOnly' | 'readWrite'> & {
+  denyRead?: string[];
+  workspace?: string;
+};
+export type OpenSubagentSandbox = (ctx: ExtensionToolContext, permissions: SubagentPermissions, signal: AbortSignal, workspaceCwd?: string) => Promise<{
   executeTool: ExtensionToolContext['executeTool'];
   close(): Promise<void>;
 }>;
@@ -12,8 +15,8 @@ export type OpenSubagentSandbox = (ctx: ExtensionToolContext, permissions: Subag
 export class SubagentSandboxes {
   private scope = new AsyncLocalStorage<SandboxSession>();
   private children = new Set<SandboxSession>();
-  private create: (parent: SandboxSession, config: Config) => SandboxSession;
-  constructor(create = (parent: SandboxSession, config: Config) => new SandboxSession(parent.cwd, parent.configPath, config, parent.agentDir, true)) {
+  private create: (parent: SandboxSession, config: Config, cwd: string) => SandboxSession;
+  constructor(create = (parent: SandboxSession, config: Config, cwd: string) => new SandboxSession(cwd, parent.configPath, config, parent.agentDir, true)) {
     this.create = create;
   }
 
@@ -24,9 +27,12 @@ export class SubagentSandboxes {
     return child;
   }
 
-  async open(parent: SandboxSession, ctx: ExtensionToolContext, permissions: SubagentPermissions, signal: AbortSignal) {
-    const config = validateConfig({ ...permissions, maxNetworkMode: permissions.networkMode, denyRead: parent.config.denyRead, socatPath: parent.config.socatPath });
-    const child = this.create(parent, config);
+  async open(parent: SandboxSession, ctx: ExtensionToolContext, permissions: SubagentPermissions, signal: AbortSignal, workspaceCwd?: string) {
+    const { workspace, denyRead, ...grants } = permissions;
+    if (denyRead !== undefined && !Array.isArray(denyRead)) throw new Error('Invalid denyRead: expected an array');
+    const cwd = workspaceCwd ?? (workspace === undefined ? parent.cwd : validateWorkspace(workspace, parent.cwd));
+    const config = validateConfig({ ...grants, maxNetworkMode: grants.networkMode, denyRead: [...parent.config.denyRead, ...(denyRead ?? [])], socatPath: parent.config.socatPath });
+    const child = this.create(parent, config, cwd);
     this.children.add(child);
     const close = async () => {
       signal.removeEventListener('abort', cancel);

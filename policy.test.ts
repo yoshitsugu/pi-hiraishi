@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
-import { runtimePolicy, allowsHost, hostDecision, validateConfig, parseJsonc, parseGrants, ceilingViolations, ceilingOf, mergeGrants, networkRank, expand, restrictGrants } from './policy.ts';
+import { runtimePolicy, allowsHost, hostDecision, validateConfig, parseJsonc, parseGrants, ceilingViolations, ceilingOf, mergeGrants, networkRank, expand, restrictGrants, validateWorkspace } from './policy.ts';
 
 test('configuration rejects legacy classifier settings and malformed grants', () => {
   for (const value of [null, [], { endpoint: 'https://classifier' }, { networkMode: 'all' }, { readOnly: ['relative'] }, { readWrite: ['/'] , unknown: true }, { denyRead: ['/tmp/*'] }, { socatPath: 'socat' }]) assert.throws(() => validateConfig(value));
@@ -209,6 +209,22 @@ test('a grant ceiling clamps the startup mode and must not contradict it', () =>
   assert.throws(() => parseGrants('{"noHostCommands":"yes"}'), /noHostCommands must be a boolean/);
 });
 
+test('workspace narrowing requires an existing directory inside the parent workspace', () => {
+  const root = mkdtempSync('/tmp/hiraishi-workspace-');
+  try {
+    for (const dir of ['project', 'project/sub', 'project/other', 'outside']) mkdirSync(`${root}/${dir}`);
+    symlinkSync(`${root}/outside`, `${root}/project/escape`);
+    symlinkSync(`${root}/project/sub`, `${root}/project/alias`);
+    assert.equal(validateWorkspace(`${root}/project/sub`, `${root}/project`), `${root}/project/sub`);
+    assert.equal(validateWorkspace(`${root}/project/alias`, `${root}/project`), `${root}/project/sub`);
+    assert.equal(validateWorkspace(`${root}/project`, `${root}/project`), `${root}/project`);
+    for (const value of [`${root}/outside`, `${root}/project/escape`, `${root}/project/missing`, `${root}/project/other/file`, 'relative', `${root}/project/*`])
+      assert.throws(() => validateWorkspace(value, `${root}/project`), /Invalid workspace/);
+    assert.throws(() => validateWorkspace(`${root}/project/sub`, `${root}/project/missing`), /outside the parent working directory/);
+    assert.throws(() => parseGrants(JSON.stringify({ workspace: `${root}/project/sub` })), /unknown setting workspace/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('delegated sessions can drop host commands and pin their workspace', () => {
   const root = mkdtempSync('/tmp/hiraishi-delegated-');
   try {
@@ -223,7 +239,7 @@ test('delegated sessions can drop host commands and pin their workspace', () => 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('host commands are validated and never accepted from the command line', () => {
+test('host commands are validated and command-line keep-lists name configured commands', () => {
   const command = { name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [{ name: 'run', argv: ['run', '--name', '{name}', 'pi', '-e', '{hiraishi}', '--hiraishi-grants', '{grants}', '{task}'] }] };
   assert.equal(validateConfig({ hostCommands: [command] }).hostCommands?.[0]?.name, 'hc');
   assert.deepEqual(validateConfig({ hostCommands: [{ ...command, env: ['HOME', 'AUTH_TOKEN'] }] }).hostCommands?.[0]?.env, ['HOME', 'AUTH_TOKEN']);
@@ -241,8 +257,38 @@ test('host commands are validated and never accepted from the command line', () 
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: ['run', '--max={timeout}'] }] }] },
     { hostCommands: [{ ...command, operations: [{ name: 'run', argv: ['run', '{name}', '{task}'] }] }] },
   ]) assert.throws(() => validateConfig(value));
-  assert.throws(() => parseGrants(JSON.stringify({ hostCommands: [command] })), /cannot be set from the command line/);
+  assert.deepEqual(parseGrants(JSON.stringify({ hostCommands: ['hc', 'hc'] })).hostCommands, ['hc']);
+  for (const value of [{ hostCommands: 'hc' }, { hostCommands: ['Bad Name'] }, { hostCommands: Array(17).fill('hc') }])
+    assert.throws(() => parseGrants(JSON.stringify(value)), /hostCommands must be an array/);
   assert.throws(() => parseGrants(JSON.stringify({ env: ['HOME'] })), /unknown setting env/);
+});
+
+test('delegable host commands are explicit and never start another child', () => {
+  const command = { name: 'itest', path: '/usr/bin/itest', operations: [{ name: 'run', argv: ['run', '{cwd}', '{task}'] }] };
+  assert.equal(validateConfig({ hostCommands: [{ ...command, delegable: true }] }).hostCommands?.[0]?.delegable, true);
+  assert.equal(validateConfig({ hostCommands: [{ ...command, delegable: false }] }).hostCommands?.[0]?.delegable, undefined);
+  assert.throws(() => validateConfig({ hostCommands: [{ ...command, delegable: 'yes' }] }), /delegable: use a boolean/);
+  assert.throws(() => validateConfig({ hostCommands: [{ ...command, starts: 'run', delegable: true, operations: [{ name: 'run', argv: ['run', '{grants}'] }] }] }), /cannot be delegable and start another child/);
+  for (const placeholder of ['{hiraishi}', '{grants}'])
+    assert.throws(() => validateConfig({ hostCommands: [{ ...command, delegable: true, operations: [{ name: 'run', argv: ['run', placeholder] }] }] }), /delegable and cannot use \{hiraishi\} or \{grants\}/);
+});
+
+test('host command keep-lists only narrow and reject unknown or re-delegating commands', () => {
+  const itest = { name: 'itest', path: '/usr/bin/itest', delegable: true, operations: [{ name: 'run', argv: ['run', '{cwd}', '{task}'] }] };
+  const other = { name: 'other', path: '/usr/bin/other', operations: [{ name: 'run', argv: ['run'] }] };
+  const hc = { name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [{ name: 'run', argv: ['run', '{hiraishi}', '{grants}'] }] };
+  const baseline = validateConfig({ hostCommands: [itest, other, hc] });
+  const kept = mergeGrants(baseline, parseGrants(JSON.stringify({ noHostCommands: true, hostCommands: ['itest'] })));
+  assert.deepEqual(kept.hostCommands?.map(command => command.name), ['itest']);
+  assert.deepEqual(mergeGrants(baseline, parseGrants(JSON.stringify({ hostCommands: ['itest'] }))).hostCommands?.map(command => command.name), ['itest']);
+  assert.equal(mergeGrants(baseline, parseGrants(JSON.stringify({ noHostCommands: true, hostCommands: [] }))).hostCommands, undefined);
+  assert.equal(mergeGrants(baseline, parseGrants(JSON.stringify({ noHostCommands: true }))).hostCommands, undefined);
+  assert.deepEqual(mergeGrants(baseline, parseGrants('{}')).hostCommands?.map(command => command.name), ['itest', 'other', 'hc']);
+  assert.throws(() => mergeGrants(baseline, parseGrants(JSON.stringify({ hostCommands: ['missing'] }))), /unknown host command missing/);
+  assert.throws(() => mergeGrants(baseline, parseGrants(JSON.stringify({ hostCommands: ['hc'] }))), /starts another child and cannot be delegated/);
+  assert.throws(() => mergeGrants(validateConfig({ hostCommands: [itest] }), parseGrants(JSON.stringify({ hostCommands: ['other'] }))), /unknown host command other/);
+  const restricted = restrictGrants(baseline, parseGrants(JSON.stringify({ noHostCommands: true, hostCommands: ['itest'] })));
+  assert.deepEqual(restricted.hostCommands?.map(command => command.name), ['itest']);
 });
 
 test('grants are canonicalized so a later symlink swap cannot widen the grant', () => {
