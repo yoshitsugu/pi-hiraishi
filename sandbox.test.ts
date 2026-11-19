@@ -159,7 +159,7 @@ integration('pi adapters execute through SRT, refuse replacements, and reset per
   writeFileSync(`${root}/config`,JSON.stringify({...(socatPath?{socatPath}:{}),networkMode:'off'}));
   const {default:extension}=await import('./hiraishi.ts');
   const handlers=new Map<string,any>(),tools=new Map<string,any>(),commands=new Map<string,any>();const statuses:string[]=[];const notices:string[]=[];
-  const pi={on:(name:string,fn:unknown)=>handlers.set(name,fn),registerTool:(t:any)=>tools.set(t.name,{...t,sourceInfo:{source:'extension',path:new URL('./hiraishi.ts',import.meta.url).pathname}}),getAllTools:()=>[...tools.values()],registerCommand:(name:string,c:any)=>commands.set(name,c)};
+  const pi={on:(name:string,fn:unknown)=>handlers.set(name,fn),registerTool:(t:any)=>tools.set(t.name,{...t,sourceInfo:{source:'extension',path:new URL('./hiraishi.ts',import.meta.url).pathname}}),getAllTools:()=>[...tools.values()],registerCommand:(name:string,c:any)=>commands.set(name,c),registerFlag(){},getFlag:()=>undefined};
   const ctx:any={cwd:`${root}/project`,ui:{setStatus:(_key:string,text:string)=>statuses.push(text),notify:(text:string)=>notices.push(text)}};
   try {
     extension(pi as any);await handlers.get('session_start')({},ctx);
@@ -316,7 +316,7 @@ integration('pi nested tool pipeline routes registered adapters to child sandbox
   const pi = {
     on: (name: string, handler: unknown) => handlers.set(name, handler),
     registerTool: (tool: any) => definitions.set(tool.name, { ...tool, sourceInfo: { source: 'extension', path: new URL('./hiraishi.ts', import.meta.url).pathname } }),
-    getAllTools: () => [...definitions.values()], registerCommand() {},
+    getAllTools: () => [...definitions.values()], registerCommand() {}, registerFlag() {}, getFlag: () => undefined,
   };
   const responses: any[] = [];
   const requests: any[] = [];

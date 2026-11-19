@@ -34,8 +34,8 @@ test('separate children retain denies but do not inherit parent grants or leak s
   const first = await h.sandboxes.open(h.parent, h.ctx, defaults, new AbortController().signal);
   const grants = { networkMode: 'http-get' as const, readOnly: ['/other'], readWrite: [] };
   const second = await h.sandboxes.open(h.parent, h.ctx, grants, new AbortController().signal);
-  assert.deepEqual(h.created[0]!.config, { ...defaults, denyRead: ['/project/.env'], socatPath: '/custom/socat' });
-  assert.deepEqual(h.created[1]!.config, { ...grants, denyRead: ['/project/.env'], socatPath: '/custom/socat' });
+  assert.deepEqual(h.created[0]!.config, { ...defaults, networkMode: defaults.networkMode, maxNetworkMode: defaults.networkMode, denyRead: ['/project/.env'], socatPath: '/custom/socat' });
+  assert.deepEqual(h.created[1]!.config, { ...grants, maxNetworkMode: grants.networkMode, denyRead: ['/project/.env'], socatPath: '/custom/socat' });
   await Promise.all([first.executeTool('read', {}), second.executeTool('read', {})]);
   assert.deepEqual(h.observed, [h.created[0], h.created[1], h.created[0], h.created[1]]);
   assert.equal(h.sandboxes.current(h.parent), h.parent);

@@ -5,7 +5,8 @@ import type { OpenSubagentSandbox } from './subagent-sandbox.ts';
 import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
 const open: OpenSubagentSandbox = async ctx => ({ executeTool: (...args) => ctx.executeTool(...args), close: async () => {} });
-const runSubagent = (input: unknown, ctx: ExtensionToolContext, current: () => boolean, signal?: AbortSignal) => executeSubagent(input, ctx, current, signal, open);
+const wide = () => ({ networkMode: 'http-all' as const, readOnly: ['/'], readWrite: ['/'] });
+const runSubagent = (input: unknown, ctx: ExtensionToolContext, current: () => boolean, signal?: AbortSignal) => executeSubagent(input, ctx, current, signal, open, wide);
 
 const text = (value: string) => ({ type: 'text', text: value });
 const call = (name: string, args: Record<string, unknown> = {}) => ({ type: 'toolCall', id: `call-${name}`, name, arguments: args });
@@ -135,7 +136,7 @@ test('provider failures, missing models, bad requests and tool-call limits fail 
 test('a replaced subagent adapter is refused before reaching the parent model', async () => {
   const registered = new Map<string, any>([['read', { name: 'read' }]]);
   const pi = { registerTool: (tool: any) => registered.set(tool.name, tool), getAllTools: () => [...registered.values()].map(tool => ({ ...tool, sourceInfo: { source: 'cli', path: 'trusted-hiraishi' } })) } as unknown as ExtensionAPI;
-  const installed = installSubagent(pi, () => () => true, open);
+  const installed = installSubagent(pi, () => () => true, open, wide);
   assert(installed.owns(pi.getAllTools().find(tool => tool.name === 'hiraishi_subagent')));
   const original = registered.get('hiraishi_subagent');
   registered.set('hiraishi_subagent', { ...original, parameters: { ...original.parameters } });
@@ -202,7 +203,7 @@ test('child starts with minimal permissions and only receives explicit parent gr
     const result = await executeSubagent({ task: 'Review.', permissions }, h.ctx, () => true, undefined, async (ctx, grants) => {
       received = grants;
       return { executeTool: ctx.executeTool, close: async () => { closed++; } };
-    });
+    }, wide);
     assert.equal(result.details.status, 'complete');
     assert.deepEqual(received, permissions ? { networkMode: 'http-get', readOnly: ['/reference'], readWrite: ['/cache'] } : { networkMode: 'off', readOnly: [], readWrite: [] });
     assert.equal(closed, 1);
@@ -210,7 +211,31 @@ test('child starts with minimal permissions and only receives explicit parent gr
   const h = harness([]);
   for (const permissions of [null, [], {}, { reason: '' }, { reason: 'x', approval: 'automatic' }, { reason: 'x', networkMode: 'all' }, { reason: 'x', readOnly: ['relative'] }, { reason: 'x', denyRead: [] }])
     await assert.rejects(runSubagent({ task: 'Review.', permissions }, h.ctx, () => true));
-  assert.equal((await executeSubagent({ task: 'Review.' }, h.ctx, () => true)).details.status, 'unavailable');
+  assert.equal((await executeSubagent({ task: 'Review.' }, h.ctx, () => true, undefined, undefined, wide)).details.status, 'unavailable');
+});
+
+test('child permissions beyond the session ceiling fail closed unless the user chooses', async () => {
+  const limit = () => ({ networkMode: 'http-get' as const, readOnly: ['/reference'], readWrite: [] });
+  let opened = 0;
+  const sandbox = async (ctx: ExtensionToolContext) => ({ executeTool: ctx.executeTool, close: async () => { opened++; } });
+  const h = harness([response([text('Done.')]), response([text('Done again.')])]);
+  const blocked = await executeSubagent({ task: 'Review.', permissions: { networkMode: 'http-all', reason: 'Need everything' } }, h.ctx, () => true, undefined, sandbox, limit);
+  assert.equal(blocked.details.status, 'blocked');
+  assert.match(blocked.content[0]!.text, /session ceiling/);
+  assert.equal(opened, 0);
+  assert.equal(h.requests.length, 0);
+  const pathBlocked = await executeSubagent({ task: 'Review.', permissions: { readWrite: ['/elsewhere'], reason: 'Need cache' } }, h.ctx, () => true, undefined, sandbox, limit);
+  assert.equal(pathBlocked.details.status, 'blocked');
+  assert.match(pathBlocked.content[0]!.text, /elsewhere/);
+  assert.equal((await executeSubagent({ task: 'Review.', permissions: { networkMode: 'http-all', approval: 'user', reason: 'Need everything' } }, h.ctx, () => true, undefined, sandbox, limit)).details.status, 'blocked');
+  assert.equal(opened, 0);
+  h.ctx.hasUI = true;
+  h.ctx.ui = { select: async (title: string) => { assert.match(title, /Exceeds session ceiling \(http-get\)/); return 'Allow requested permissions'; } } as any;
+  const allowed = await executeSubagent({ task: 'Review.', permissions: { networkMode: 'http-all', approval: 'user', reason: 'Need everything' } }, h.ctx, () => true, undefined, sandbox, limit);
+  assert.equal(allowed.details.status, 'complete');
+  assert.equal(opened, 1);
+  const within = await executeSubagent({ task: 'Review.', permissions: { networkMode: 'http-get', readOnly: ['/reference/docs'], reason: 'Docs' } }, h.ctx, () => true, undefined, sandbox, limit);
+  assert.equal(within.details.status, 'complete');
 });
 
 test('uncertain permissions require the user choice before opening a sandbox or sending a model request', async () => {
@@ -228,7 +253,7 @@ test('uncertain permissions require the user choice before opening a sandbox or 
     const result = await executeSubagent({ task: 'Review.', permissions: { networkMode: 'http-get', reason: 'Need fresh docs', approval: 'user' } }, h.ctx, () => true, undefined, async (ctx, permissions) => {
       received = permissions;
       return { executeTool: ctx.executeTool, close: async () => {} };
-    });
+    }, wide);
     if (choice === 'Allow requested permissions' || choice === 'Run with default permissions') {
       assert.equal(result.details.status, 'complete');
       assert.deepEqual(received, { networkMode: choice === 'Allow requested permissions' ? 'http-get' : 'off', readOnly: [], readWrite: [] });
@@ -252,7 +277,7 @@ test('cancellation during permission choice prevents sandbox startup', async () 
   const running = executeSubagent({ task: 'Review.', permissions: { reason: 'Need docs', approval: 'user' } }, h.ctx, () => true, controller.signal, async () => {
     opened = true;
     throw new Error('Must not open');
-  });
+  }, wide);
   controller.abort();
   assert.equal((await running).details.status, 'cancelled');
   assert.equal(opened, false);
@@ -269,12 +294,12 @@ test('network denials return to the parent even when a shell command exits succe
 
 test('sandbox setup failures preserve the reason and teardown failures cannot report success', async () => {
   const failed = harness([]);
-  const setup = await executeSubagent({ task: 'Review.' }, failed.ctx, () => true, undefined, async () => { throw new Error('Writable directory is too broad'); });
+  const setup = await executeSubagent({ task: 'Review.' }, failed.ctx, () => true, undefined, async () => { throw new Error('Writable directory is too broad'); }, wide);
   assert.equal(setup.details.status, 'failed');
   assert.match(setup.content[0]!.text, /Writable directory is too broad/);
   assert.equal(failed.requests.length, 0);
   const h = harness([response([text('Done.')])]);
-  await assert.rejects(executeSubagent({ task: 'Review.' }, h.ctx, () => true, undefined, async ctx => ({ executeTool: ctx.executeTool, close: async () => { throw new Error('Cleanup failed'); } })), /Cleanup failed/);
+  await assert.rejects(executeSubagent({ task: 'Review.' }, h.ctx, () => true, undefined, async ctx => ({ executeTool: ctx.executeTool, close: async () => { throw new Error('Cleanup failed'); } }), wide), /Cleanup failed/);
 });
 
 

@@ -4,10 +4,11 @@ import {
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, createBashToolDefinition, getAgentDir,
   type ExtensionAPI, type ExtensionContext, type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { isNetworkMode, loadConfig, NETWORK_DENIAL_GUIDANCE, type NetworkMode } from './policy.ts';
+import { canonicalPath, ceilingOf, ceilingViolations, isNetworkMode, loadConfig, mergeGrants, NETWORK_DENIAL_GUIDANCE, parseGrants, restrictGrants, type Config, type NetworkMode } from './policy.ts';
 import { SandboxSession } from './session.ts';
 import { createOperations } from './tools.ts';
 import { installSubagent } from './subagent.ts';
+import { installHostBridge, HOST_TOOL } from './host-bridge.ts';
 import { SubagentSandboxes } from './subagent-sandbox.ts';
 import { installFooter } from './footer.ts';
 
@@ -17,6 +18,8 @@ export default function hiraishi(pi: ExtensionAPI) {
   let error = 'Hiraishi session has not started';
   let lifecycle = {};
   let retirement = Promise.resolve();
+  let hostCommands: Config['hostCommands'] = [];
+  let hostBaseline: Config | undefined;
   const children = new SubagentSandboxes();
   const sourcePath = fileURLToPath(import.meta.url);
   const schemas = new Map<string, object>();
@@ -26,10 +29,40 @@ export default function hiraishi(pi: ExtensionAPI) {
   };
   const current = (ctx: ExtensionContext) => {
     if (!session || session.status !== 'ready') throw new Error(session ? `Hiraishi sandbox ${session.status}: ${session.failureReason}` : error);
-    if (resolve(ctx.cwd) !== session.cwd) throw new Error('Working directory changed; start a new session');
+    if (canonicalPath(ctx.cwd) !== session.cwd) throw new Error('Working directory changed; start a new session');
     return children.current(session);
   };
-  const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
+  const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}${session.ceilingMode !== session.mode ? `/max:${session.ceilingMode}` : ''}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
+  pi.registerFlag('hiraishi-grants', {
+    type: 'string',
+    description: `JSON session permissions granted by the caller, e.g. '{"networkMode":"http-get","maxNetworkMode":"http-get","readOnly":["/docs"],"replace":{"readOnly":["/docs"]},"denyRead":["/project/.env"]}'. Directory grants are additive; replace drops baseline directories explicitly; denyRead only grows; maxNetworkMode lowers the session ceiling. cwd pins the expected workspace and noHostCommands drops host commands for delegated work. Requests beyond maxNetworkMode ask the user in interactive sessions and refuse the session otherwise.`,
+  });
+  const clean = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
+  let refused = false;
+  const resolveGrants = async (ctx: ExtensionContext, baseline: Config): Promise<Config> => {
+    const raw = pi.getFlag('hiraishi-grants');
+    if (typeof raw !== 'string' || !raw.trim()) return baseline;
+    let grants;
+    try { grants = parseGrants(raw); }
+    catch (error) { refused = !ctx.hasUI; throw error; }
+    if (grants.expectedCwd && grants.expectedCwd !== canonicalPath(ctx.cwd)) {
+      refused = !ctx.hasUI;
+      throw new Error(`Working directory changed since this child was launched: expected ${grants.expectedCwd}`);
+    }
+    const violations = ceilingViolations(grants, ceilingOf(baseline));
+    if (!violations.length) return mergeGrants(baseline, grants);
+    // A caller that cannot ask the user must not get a session at all.
+    refused = true;
+    if (!ctx.hasUI) throw new Error(`Requested Hiraishi permissions exceed the session ceiling and no interactive UI is available to approve them: ${violations.join('; ')}`);
+    const requested = clean(raw.length > 1000 ? `${raw.slice(0, 1000)}…` : raw);
+    const listed = violations.slice(0, 10).map(v => `- ${clean(v)}`).join('\n') + (violations.length > 10 ? `\n… ${violations.length - 10} more` : '');
+    const choice = await ctx.ui.select(`Hiraishi permission request exceeds the session ceiling (maxNetworkMode: ${baseline.maxNetworkMode})\nRequested: ${requested}\nViolations:\n${listed}`,
+      ['Allow requested permissions', 'Start with baseline permissions', 'Refuse to start']);
+    if (choice === 'Allow requested permissions') return mergeGrants(baseline, grants);
+    if (choice === 'Start with baseline permissions') return restrictGrants(baseline, grants);
+    refused = true;
+    throw new Error('Hiraishi permission request refused by the user');
+  };
   const definitionFor = (name: string, active: SandboxSession, cwd: string, signal?: AbortSignal, onNetworkDenied?: () => void) => {
     const op = createOperations(active, signal, onNetworkDenied);
     switch (name) {
@@ -56,12 +89,23 @@ export default function hiraishi(pi: ExtensionAPI) {
   const subagent = installSubagent(pi, ctx => {
     const parent = current(ctx), epoch = parent.epoch;
     return () => parent === session && parent.status === 'ready' && parent.epoch === epoch;
-  }, (ctx, permissions, signal) => children.open(current(ctx), ctx, permissions, signal));
+  }, (ctx, permissions, signal) => children.open(current(ctx), ctx, permissions, signal),
+  ctx => ceilingOf(current(ctx).config, current(ctx).cwd));
+  const bridge = installHostBridge(pi, {
+    hiraishiPath: sourcePath,
+    commands: () => hostCommands ?? [],
+    baseline: () => hostBaseline ?? loadConfig(configPath),
+    scope: ctx => {
+      const parent = current(ctx);
+      return { ceiling: ceilingOf(parent.config, parent.cwd), writable: [parent.cwd, ...parent.config.readWrite], denyRead: parent.config.denyRead };
+    },
+  });
   pi.on('tool_call', (event, ctx) => {
     try {
       current(ctx);
-      if (owns(event.toolName) || event.toolName === 'hiraishi_subagent' && subagent.owns(pi.getAllTools().find(tool => tool.name === event.toolName))) return;
-      return { block: true, reason: `Hiraishi refuses unadapted tool ${event.toolName}. Use read, write, edit, bash, or hiraishi_subagent.` };
+      if (owns(event.toolName) || event.toolName === 'hiraishi_subagent' && subagent.owns(pi.getAllTools().find(tool => tool.name === event.toolName)) ||
+          event.toolName === HOST_TOOL && bridge.owns(pi.getAllTools().find(tool => tool.name === event.toolName))) return;
+      return { block: true, reason: `Hiraishi refuses unadapted tool ${event.toolName}. Use read, write, edit, bash, hiraishi_subagent or hiraishi_host.` };
     } catch (e) { return { block: true, reason: String((e as Error).message) }; }
   });
   pi.on('user_bash', (_event, ctx) => ({ operations: { exec: async (command, cwd, options) => {
@@ -73,6 +117,9 @@ export default function hiraishi(pi: ExtensionAPI) {
     const active = session;
     session = undefined;
     error = 'Hiraishi session has ended';
+    hostCommands = [];
+    hostBaseline = undefined;
+    bridge.reset();
     const ending = active?.stop();
     retirement = Promise.all([retirement, ending, children.stop()]).then(() => {});
     // Keep failed cleanup observable to subsequent starts even when pi catches hook errors.
@@ -85,18 +132,29 @@ export default function hiraishi(pi: ExtensionAPI) {
   pi.on('session_shutdown', stop);
   const start = async (ctx: ExtensionContext) => {
     installFooter(pi, ctx);
+    refused = false;
     const token = lifecycle;
     try {
       await retirement;
       if (token !== lifecycle) return;
       if (session) throw new Error('A Hiraishi session is already active');
-      const active = new SandboxSession(resolve(ctx.cwd), configPath, loadConfig(configPath), getAgentDir());
+      const baseline = loadConfig(configPath);
+      hostBaseline = baseline;
+      const config = await resolveGrants(ctx, baseline);
+      hostCommands = config.hostCommands ?? [];
+      const active = new SandboxSession(canonicalPath(ctx.cwd), configPath, config, getAgentDir());
       session = active;
       await active.start();
     } catch (e) {
       if (token !== lifecycle) return;
       error = String((e as Error).message);
       ctx.ui.notify(`Hiraishi unavailable: ${error}`, 'error');
+      if (refused && !ctx.hasUI) {
+        // Only a refused permission request ends the process; other startup failures keep the session with tools unavailable.
+        console.error(`Hiraishi unavailable: ${error}`);
+        ctx.shutdown();
+        return;
+      }
     }
     if (token === lifecycle) display(ctx);
   };

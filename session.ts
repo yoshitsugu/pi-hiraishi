@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
-import { within, type Config, type NetworkMode } from './policy.ts';
+import { networkRank, within, type Config, type NetworkMode } from './policy.ts';
 import type { FileRequest, Request, Response } from './protocol.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -25,8 +25,10 @@ export class SandboxSession {
   private cleanupFailure?: Error;
   mode: NetworkMode = 'off';
   readonly cwd: string; readonly configPath: string; readonly config: Config; readonly agentDir: string; readonly delegated: boolean;
-  constructor(cwd: string, configPath: string, config: Config, agentDir = join(homedir(), '.pi/agent'), delegated = false) {
+  readonly ceilingMode: NetworkMode;
+  constructor(cwd: string, configPath: string, config: Config, agentDir = join(homedir(), '.pi/agent'), delegated = false, ceilingMode = config.maxNetworkMode) {
     this.cwd = cwd; this.configPath = configPath; this.config = config; this.agentDir = agentDir; this.delegated = delegated;
+    this.ceilingMode = ceilingMode;
   }
   get status() { return this.state; }
   get failureReason() { return this.failure; }
@@ -44,6 +46,7 @@ export class SandboxSession {
     return this.transitionTo(mode, false);
   }
   changeMode(mode: NetworkMode): Promise<void> {
+    if (networkRank(mode) > networkRank(this.ceilingMode)) return Promise.reject(new Error(`Network mode ${mode} exceeds this session's ceiling (${this.ceilingMode}); lower it with maxNetworkMode in the configuration`));
     if (this.state !== 'ready') return Promise.reject(new Error(this.state === 'changing' ? 'Sandbox permissions are changing; retry later' : this.failure));
     ++this.generation;
     this.state = 'changing';

@@ -25,7 +25,7 @@ export class SubagentSandboxes {
   }
 
   async open(parent: SandboxSession, ctx: ExtensionToolContext, permissions: SubagentPermissions, signal: AbortSignal) {
-    const config = validateConfig({ ...permissions, denyRead: parent.config.denyRead, socatPath: parent.config.socatPath });
+    const config = validateConfig({ ...permissions, maxNetworkMode: permissions.networkMode, denyRead: parent.config.denyRead, socatPath: parent.config.socatPath });
     const child = this.create(parent, config);
     this.children.add(child);
     const close = async () => {

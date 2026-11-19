@@ -5,12 +5,18 @@ import { isIP } from 'node:net';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 
 export type NetworkMode = 'off' | 'http-get' | 'http-all';
+export type HostPlaceholder = '{name}' | '{cwd}' | '{task}' | '{grants}' | '{lines}' | '{timeout}' | '{hiraishi}';
+export const hostPlaceholders: readonly HostPlaceholder[] = ['{name}', '{cwd}', '{task}', '{grants}', '{lines}', '{timeout}', '{hiraishi}'];
+export interface HostOperation { name: string; argv: string[]; timeoutSeconds?: number }
+export interface HostCommand { name: string; path: string; starts?: string; operations: HostOperation[] }
 export interface Config {
   networkMode: NetworkMode;
+  maxNetworkMode: NetworkMode;
   readOnly: string[];
   readWrite: string[];
   denyRead: string[];
   socatPath?: string;
+  hostCommands?: HostCommand[];
 }
 export const isNetworkMode = (value: unknown): value is NetworkMode => ['off', 'http-get', 'http-all'].includes(value as string);
 export const within = (path: string, root: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
@@ -19,7 +25,9 @@ export function canonicalPath(path: string): string {
   const absolute = resolve(path);
   try { return realpathSync(absolute); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(absolute) === absolute) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    // A missing or over-long path cannot exist, so resolve its existing parent instead.
+    if ((code !== 'ENOENT' && code !== 'ENAMETOOLONG') || dirname(absolute) === absolute) throw error;
     return join(canonicalPath(dirname(absolute)), basename(absolute));
   }
 }
@@ -32,25 +40,199 @@ export function parseJsonc(text: string): unknown {
 export function validateConfig(value: unknown): Config {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Hiraishi configuration');
   const c = value as Record<string, unknown>;
-  if (Object.keys(c).some(k => !['networkMode', 'readOnly', 'readWrite', 'denyRead', 'socatPath'].includes(k)) ||
-      c.networkMode !== undefined && !isNetworkMode(c.networkMode)) throw new Error('Invalid Hiraishi configuration; old classifier settings are no longer supported');
-  const result: Config = { networkMode: c.networkMode as NetworkMode ?? 'off', readOnly: [], readWrite: [], denyRead: [] };
+  const unknown = Object.keys(c).filter(k => !['networkMode', 'maxNetworkMode', 'readOnly', 'readWrite', 'denyRead', 'socatPath', 'hostCommands'].includes(k));
+  if (unknown.length) throw new Error(`Invalid Hiraishi configuration: unknown setting ${unknown.join(', ')} (old classifier settings are no longer supported)`);
+  if (c.networkMode !== undefined && !isNetworkMode(c.networkMode) || c.maxNetworkMode !== undefined && !isNetworkMode(c.maxNetworkMode))
+    throw new Error('Invalid Hiraishi configuration: networkMode and maxNetworkMode take off, http-get or http-all');
+  const result: Config = { networkMode: c.networkMode as NetworkMode ?? 'off', maxNetworkMode: c.maxNetworkMode as NetworkMode ?? 'http-all', readOnly: [], readWrite: [], denyRead: [] };
+  if (networkRank(result.networkMode) > networkRank(result.maxNetworkMode)) throw new Error('Invalid Hiraishi configuration: networkMode cannot exceed maxNetworkMode');
   for (const name of ['readOnly', 'readWrite', 'denyRead'] as const) {
     const values = c[name] ?? [];
     if (!Array.isArray(values) || values.length > 64 || values.some(p => typeof p !== 'string' || p.length > 4096 ||
         !p.length || !(isAbsolute(p) || p.startsWith('~/')) || /[\x00-\x1f\x7f*?[\]{}]/.test(p))) throw new Error(`Invalid ${name}: use literal absolute paths or ~/ paths`);
-    result[name] = values.map(expand);
+    result[name] = values.map(p => canonicalPath(expand(p)));
   }
   if (c.socatPath !== undefined) {
     if (typeof c.socatPath !== 'string' || !isAbsolute(c.socatPath) || /[\x00-\x1f\x7f]/.test(c.socatPath)) throw new Error('Invalid socatPath');
     result.socatPath = existsSync(c.socatPath) ? realpathSync(c.socatPath) : c.socatPath;
   }
+  if (c.hostCommands !== undefined) result.hostCommands = validateHostCommands(c.hostCommands);
   return result;
+}
+
+const hostName = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const hostPlaceholderSet = new Set<string>(hostPlaceholders);
+function validateHostCommands(value: unknown): HostCommand[] {
+  if (!Array.isArray(value) || value.length > 16) throw new Error('Invalid hostCommands: expected an array of at most 16 commands');
+  const seen = new Set<string>();
+  return value.map((entry): HostCommand => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Invalid hostCommands entry');
+    const command = entry as Record<string, unknown>;
+    if (Object.keys(command).some(key => !['name', 'path', 'starts', 'operations'].includes(key))) throw new Error('Invalid hostCommands entry');
+    if (typeof command.name !== 'string' || !hostName.test(command.name)) throw new Error('Invalid hostCommands name: use 1-64 of a-z, 0-9, - or _');
+    if (seen.has(command.name)) throw new Error(`Duplicate hostCommands name: ${command.name}`);
+    seen.add(command.name);
+    if (typeof command.path !== 'string' || !isAbsolute(command.path) || /[\x00-\x1f\x7f]/.test(command.path)) throw new Error('Invalid hostCommands path: use an absolute path');
+    if (command.starts !== undefined && (typeof command.starts !== 'string' || !hostName.test(command.starts))) throw new Error('Invalid hostCommands starts');
+    if (!Array.isArray(command.operations) || !command.operations.length || command.operations.length > 32) throw new Error('Invalid hostCommands operations: expected 1-32 entries');
+    const names = new Set<string>();
+    const operations = command.operations.map((item): HostOperation => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Invalid hostCommands operation');
+      const operation = item as Record<string, unknown>;
+      if (Object.keys(operation).some(key => !['name', 'argv', 'timeoutSeconds'].includes(key))) throw new Error('Invalid hostCommands operation');
+      if (typeof operation.name !== 'string' || !hostName.test(operation.name)) throw new Error('Invalid hostCommands operation name');
+      if (names.has(operation.name)) throw new Error(`Duplicate hostCommands operation: ${operation.name}`);
+      names.add(operation.name);
+      if (!Array.isArray(operation.argv) || !operation.argv.length || operation.argv.length > 64 ||
+          operation.argv.some(arg => typeof arg !== 'string' || !arg.length || arg.length > 4096 || /[\x00\x1f\x7f]/.test(arg))) throw new Error('Invalid hostCommands argv: expected 1-64 non-empty strings');
+      for (const arg of operation.argv as string[]) {
+        if (/[{}]/.test(arg) && !/^\{[a-z]+\}$/.test(arg)) throw new Error(`Invalid hostCommands argument: placeholders must fill the whole argument (${arg})`);
+        const placeholders = arg.match(/\{[a-z]+\}/g) ?? [];
+        if (placeholders.some(name => !hostPlaceholderSet.has(name))) throw new Error(`Invalid hostCommands placeholder in ${arg}`);
+      }
+      if (command.starts === operation.name && !(operation.argv as string[]).includes('{grants}')) throw new Error('hostCommands starts must pass {grants} so the child cannot bypass the session ceiling');
+      if ((operation.argv as string[]).includes('{hiraishi}') && !(operation.argv as string[]).includes('{grants}'))
+        throw new Error('hostCommands operations that start {hiraishi} must pass {grants} so the child inherits the session ceiling');
+      const timeoutSeconds = operation.timeoutSeconds;
+      if (timeoutSeconds !== undefined && (!Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 1 || (timeoutSeconds as number) > 3600)) throw new Error('Invalid hostCommands timeoutSeconds');
+      return { name: operation.name, argv: operation.argv as string[], ...(timeoutSeconds !== undefined ? { timeoutSeconds: timeoutSeconds as number } : {}) };
+    });
+    if (command.starts !== undefined && !names.has(command.starts as string)) throw new Error('hostCommands starts must name an operation');
+    return { name: command.name, path: command.path, ...(command.starts !== undefined ? { starts: command.starts as string } : {}), operations };
+  });
 }
 export function loadConfig(path: string): Config {
   try { return validateConfig(parseJsonc(readFileSync(path, 'utf8'))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return validateConfig({}); throw error; }
 }
+
+export type Grants = Partial<Pick<Config, 'networkMode' | 'maxNetworkMode' | 'readOnly' | 'readWrite' | 'denyRead'>> & {
+  replace?: Partial<Pick<Config, 'readOnly' | 'readWrite'>>;
+  /** Canonical workspace the child must start in; the child verifies it itself. */
+  expectedCwd?: string;
+  /** Drop host commands for this session so a delegated child cannot delegate again. */
+  noHostCommands?: boolean;
+};
+export interface Ceiling { networkMode: NetworkMode; readOnly: string[]; readWrite: string[] }
+export const networkRank = (mode: NetworkMode) => mode === 'off' ? 0 : mode === 'http-get' ? 1 : 2;
+export const ceilingOf = (config: Config, cwd?: string): Ceiling => ({
+  networkMode: config.maxNetworkMode,
+  readOnly: cwd ? [...config.readOnly, cwd] : config.readOnly,
+  readWrite: cwd ? [...config.readWrite, cwd] : config.readWrite,
+});
+
+const pathList = (value: unknown, name: string) => {
+  if (!Array.isArray(value)) throw new Error(`Invalid --hiraishi-grants: ${name} must be an array`);
+  return value;
+};
+
+// Caller-supplied session grants (--hiraishi-grants). socatPath stays host-controlled.
+export function parseGrants(json: string): Grants {
+  let value: unknown;
+  try { value = JSON.parse(json); }
+  catch { throw new Error('Invalid --hiraishi-grants: not valid JSON'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid --hiraishi-grants: expected a JSON object');
+  const raw = value as Record<string, unknown>;
+  if ('socatPath' in raw || 'hostCommands' in raw) throw new Error('Invalid --hiraishi-grants: host-side commands and socatPath cannot be set from the command line');
+  const { replace, cwd: expectedCwd, noHostCommands, ...rest } = raw;
+  if (expectedCwd !== undefined && (typeof expectedCwd !== 'string' || !isAbsolute(expectedCwd))) throw new Error('Invalid --hiraishi-grants: cwd must be an absolute path');
+  if (noHostCommands !== undefined && typeof noHostCommands !== 'boolean') throw new Error('Invalid --hiraishi-grants: noHostCommands must be a boolean');
+  for (const name of ['readOnly', 'readWrite', 'denyRead'] as const) if (name in rest) pathList(rest[name], name);
+  const config = validateConfig(rest);
+  const grants: Grants = {};
+  if ('networkMode' in rest) grants.networkMode = config.networkMode;
+  if ('maxNetworkMode' in rest) grants.maxNetworkMode = config.maxNetworkMode;
+  if ('readOnly' in rest) grants.readOnly = config.readOnly;
+  if ('readWrite' in rest) grants.readWrite = config.readWrite;
+  if ('denyRead' in rest) grants.denyRead = config.denyRead;
+  if (expectedCwd !== undefined) grants.expectedCwd = canonicalPath(expectedCwd);
+  if (noHostCommands !== undefined) grants.noHostCommands = noHostCommands;
+  if (grants.networkMode && grants.maxNetworkMode && networkRank(grants.networkMode) > networkRank(grants.maxNetworkMode))
+    throw new Error('Invalid --hiraishi-grants: networkMode cannot exceed maxNetworkMode');
+  if (replace !== undefined) {
+    if (!replace || typeof replace !== 'object' || Array.isArray(replace)) throw new Error('Invalid --hiraishi-grants: replace must be an object');
+    const exact = replace as Record<string, unknown>;
+    if (Object.keys(exact).some(key => !['readOnly', 'readWrite'].includes(key))) throw new Error('Invalid --hiraishi-grants: replace accepts readOnly and readWrite');
+    for (const name of ['readOnly', 'readWrite'] as const) {
+      if (name in exact && name in rest) throw new Error(`Invalid --hiraishi-grants: use either ${name} or replace.${name}, not both`);
+      if (name in exact) pathList(exact[name], `replace.${name}`);
+    }
+    const validated = validateConfig({ networkMode: 'off', ...exact });
+    grants.replace = {
+      ...('readOnly' in exact ? { readOnly: validated.readOnly } : {}),
+      ...('readWrite' in exact ? { readWrite: validated.readWrite } : {}),
+    };
+  }
+  return grants;
+}
+
+// Grants may narrow the session ceiling, add directories, or (via replace) drop baseline directories.
+export function ceilingViolations(grants: Grants, ceiling: Ceiling): string[] {
+  const violations: string[] = [];
+  for (const key of ['networkMode', 'maxNetworkMode'] as const) {
+    const value = grants[key];
+    if (value && networkRank(value) > networkRank(ceiling.networkMode))
+      violations.push(`${key} ${value} exceeds the session ceiling ${ceiling.networkMode}`);
+  }
+  for (const name of ['readOnly', 'readWrite'] as const) {
+    const roots = ceiling[name].map(canonicalPath);
+    for (const path of [...(grants[name] ?? []), ...(grants.replace?.[name] ?? [])]) {
+      if (!roots.some(root => within(canonicalPath(path), root)))
+        violations.push(`${name} ${path} is outside the session ceiling`);
+    }
+  }
+  return violations;
+}
+
+// Merge-time normalization also bounds any later symlink swap.
+export function canonicalGrants(grants: Grants): Grants {
+  const exact = grants.replace;
+  return {
+    ...(grants.networkMode ? { networkMode: grants.networkMode } : {}),
+    ...(grants.maxNetworkMode ? { maxNetworkMode: grants.maxNetworkMode } : {}),
+    ...(grants.readOnly ? { readOnly: grants.readOnly.map(canonicalPath) } : {}),
+    ...(grants.readWrite ? { readWrite: grants.readWrite.map(canonicalPath) } : {}),
+    ...(grants.denyRead ? { denyRead: grants.denyRead.map(canonicalPath) } : {}),
+    ...(grants.expectedCwd ? { cwd: canonicalPath(grants.expectedCwd) } : {}),
+    ...(grants.noHostCommands ? { noHostCommands: grants.noHostCommands } : {}),
+    ...(exact ? { replace: {
+      ...(exact.readOnly ? { readOnly: exact.readOnly.map(canonicalPath) } : {}),
+      ...(exact.readWrite ? { readWrite: exact.readWrite.map(canonicalPath) } : {}),
+    } } : {}),
+  };
+}
+
+// Unspecified fields inherit the baseline. Directory grants are additive unless replace names them explicitly;
+// denyRead only ever grows. An explicit grant ceiling (maxNetworkMode, else networkMode) caps the session; a value
+// above the configured maximum is only reached after the user approves it. Paths are canonicalized here so a later
+// symlink swap is detectable at startup.
+export function mergeGrants(baseline: Config, grants: Grants): Config {
+  const unique = (paths: string[]) => [...new Set(paths.map(canonicalPath))];
+  const ceiling = grants.maxNetworkMode ?? grants.networkMode ?? baseline.maxNetworkMode;
+  const start = grants.networkMode ?? baseline.networkMode;
+  return {
+    networkMode: networkRank(start) <= networkRank(ceiling) ? start : ceiling,
+    maxNetworkMode: ceiling,
+    readOnly: grants.replace?.readOnly !== undefined ? unique(grants.replace.readOnly) : unique([...baseline.readOnly, ...(grants.readOnly ?? [])]),
+    readWrite: grants.replace?.readWrite !== undefined ? unique(grants.replace.readWrite) : unique([...baseline.readWrite, ...(grants.readWrite ?? [])]),
+    denyRead: unique([...baseline.denyRead, ...(grants.denyRead ?? [])]),
+    socatPath: baseline.socatPath,
+    ...(!grants.noHostCommands && baseline.hostCommands ? { hostCommands: baseline.hostCommands } : {}),
+  };
+}
+// "Start with baseline" keeps every restriction the request asked for while dropping its additions.
+export function restrictGrants(baseline: Config, grants: Grants): Config {
+  const ceiling = ceilingOf(baseline);
+  const requested = grants.maxNetworkMode ?? grants.networkMode;
+  const lowered = requested && networkRank(requested) < networkRank(baseline.maxNetworkMode) ? requested : baseline.maxNetworkMode;
+  const replace = grants.replace && ceilingViolations({ replace: grants.replace }, ceiling).length === 0 ? grants.replace : undefined;
+  return mergeGrants({ ...baseline, maxNetworkMode: lowered }, {
+    ...(replace ? { replace } : {}),
+    ...(grants.denyRead ? { denyRead: grants.denyRead } : {}),
+    ...(grants.noHostCommands ? { noHostCommands: true } : {}),
+  });
+}
+
 const systemWriteRoots = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/proc', '/sys', '/dev', '/run'];
 const systemReadPaths = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc/ssl', '/etc/pki', '/etc/ld.so.cache', '/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf'];
 export const privateAddressRanges = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4', '::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8', '2001:db8::/32'];
@@ -72,14 +254,20 @@ export function hostDecision(mode: NetworkMode, host: string, delegated = false)
   return allowsHost(mode, host) ? true : { allow: false, reason: `Hiraishi network mode ${mode}: ${mode === 'off' ? 'external network is disabled' : 'a public DNS hostname is required; literal IPs, localhost and single-label names are not permitted'}. ${networkDenialGuidance(delegated)}` };
 }
 export interface PolicyInput { cwd: string; configPath: string; runtimeRoot: string; srtRoot: string; temp: string; home: string; mode: NetworkMode; config: Config; agentDir?: string; delegated?: boolean }
+// Grants are canonicalized when validated, so a path that resolves elsewhere now was swapped after the fact.
+function strictPath(path: string): string {
+  const real = realpathSync(path);
+  if (real !== path) throw new Error(`Grant path changed since it was validated; start a new session: ${path}`);
+  return real;
+}
 export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
   const { config, mode, temp, home } = input;
-  const cwd = realpathSync(input.cwd);
+  const cwd = strictPath(input.cwd);
   const hostHome = canonicalPath(homedir());
   const agentDirs = [...new Set([input.agentDir ?? join(homedir(), '.pi/agent'), join(homedir(), '.pi/agent')].map(canonicalPath))];
   const sessionRoot = canonicalPath(dirname(temp));
-  const userWrites = [cwd, ...config.readWrite.map(p => realpathSync(p))];
-  const userReads = config.readOnly.map(p => realpathSync(p));
+  const userWrites = [cwd, ...config.readWrite.map(strictPath)];
+  const userReads = config.readOnly.map(strictPath);
   for (const path of [...userWrites, ...userReads]) {
     if (overlaps(path, sessionRoot)) throw new Error(`Grant overlaps private SRT session state: ${path}`);
   }
