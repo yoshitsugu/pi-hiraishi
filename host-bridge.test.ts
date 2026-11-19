@@ -29,9 +29,13 @@ function harness(configured: HostCommand[], roots: string[], options: { baseline
     calls.push({ bin, args, timeout: execOptions.timeout });
     return { output: failed ? 'boom' : 'ok', failed };
   };
+  let loading = true;
   const pi = {
-    registerTool: (tool: any) => { tools.set(tool.name, { ...tool, sourceInfo: { source: 'extension', path: 'hiraishi-host.ts' } }); },
-    getAllTools: () => [...tools.values()],
+    registerTool: (tool: any) => { tools.set(tool.name, { ...tool, sourceInfo: { source: 'extension', path: '/opt/hiraishi/hiraishi.ts' } }); },
+    getAllTools: () => {
+      if (loading) throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.');
+      return [...tools.values()];
+    },
   } as unknown as ExtensionAPI;
   const baseline = options.baseline ?? validateConfig({});
   const ceiling = options.ceiling ?? { networkMode: 'http-get' as const, readOnly: [] as string[], readWrite: [] as string[] };
@@ -42,6 +46,7 @@ function harness(configured: HostCommand[], roots: string[], options: { baseline
     scope: () => ({ ceiling, writable: roots, denyRead: options.denyRead ?? [] }),
     exec,
   });
+  loading = false;
   return {
     calls,
     ctx: {} as ExtensionToolContext,

@@ -67,9 +67,8 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
   const exec = options.exec ?? defaultExec;
   const started = new Map<string, Set<string>>();
   const running = new Set<AbortController>();
-  let ownership: { parameters: unknown; path: string } | undefined;
-  const owns = (info: ToolInfo | undefined) => !!info && !!ownership && info.name === HOST_TOOL &&
-    info.parameters === ownership.parameters && info.sourceInfo.path === ownership.path && info.sourceInfo.source !== 'builtin';
+  const owns = (info: ToolInfo | undefined) => !!info && info.name === HOST_TOOL &&
+    info.parameters === parameters && info.sourceInfo.path === options.hiraishiPath && info.sourceInfo.source !== 'builtin';
 
   // The child reads its own config baseline, so every delegated grant is intersected with it and rewritten as an exact
   // set. That keeps the child inside this session even when the caller used replace, and it never widens the ceiling.
@@ -199,8 +198,6 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
     },
   });
 
-  const registered = pi.getAllTools().find(tool => tool.name === HOST_TOOL);
-  if (registered) ownership = { parameters: registered.parameters, path: registered.sourceInfo.path };
   const reset = () => {
     started.clear();
     for (const controller of running) controller.abort();
