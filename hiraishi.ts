@@ -35,7 +35,7 @@ export default function hiraishi(pi: ExtensionAPI) {
   const display = (ctx: ExtensionContext) => ctx.ui.setStatus('hiraishi', session?.status === 'ready' ? `🛡️[sandbox:on,network:${session.mode}${session.ceilingMode !== session.mode ? `/max:${session.ceilingMode}` : ''}]` : `🛡️[sandbox:${session?.status ?? 'unavailable'},network:unavailable]`);
   pi.registerFlag('hiraishi-grants', {
     type: 'string',
-    description: `JSON session permissions granted by the caller, e.g. '{"networkMode":"http-get","maxNetworkMode":"http-get","readOnly":["/docs"],"replace":{"readOnly":["/docs"]},"denyRead":["/project/.env"]}'. Directory grants are additive; replace drops baseline directories explicitly; denyRead only grows; maxNetworkMode lowers the session ceiling. cwd pins the expected workspace and noHostCommands drops host commands for delegated work. Requests beyond maxNetworkMode ask the user in interactive sessions and refuse the session otherwise.`,
+    description: `JSON session permissions granted by the caller, e.g. '{"networkMode":"http-get","maxNetworkMode":"http-get","readOnly":["/docs"],"replace":{"readOnly":["/docs"]},"denyRead":["/project/.env"]}'. Directory grants are additive; replace drops baseline directories explicitly; denyRead only grows; maxNetworkMode lowers the session ceiling. cwd pins the expected workspace and noHostCommands drops host commands for delegated work. Requests beyond maxNetworkMode ask the user in interactive sessions and refuse the session otherwise. The configuration's maxReadOnly and maxReadWrite raise the path ceiling without adding grants.`,
   });
   const clean = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
   let refused = false;

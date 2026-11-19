@@ -20,7 +20,7 @@ interface Harness {
   run(input: Record<string, unknown>, signal?: AbortSignal): Promise<{ details: { status: string }; content: { text: string }[] }>;
 }
 
-function harness(configured: HostCommand[], roots: string[], options: { baseline?: Config; denyRead?: string[]; ceiling?: { networkMode: 'off' | 'http-get' | 'http-all'; readOnly: string[]; readWrite: string[] } } = {}): Harness {
+function harness(configured: HostCommand[], roots: string[], options: { baseline?: Config; denyRead?: string[]; ceiling?: { networkMode: 'off' | 'http-get' | 'http-all'; readOnly: string[]; readWrite: string[] }; ctx?: ExtensionToolContext } = {}): Harness {
   const tools = new Map<string, any>();
   const calls: { bin: string; args: string[]; timeout: number }[] = [];
   let failed = false;
@@ -47,18 +47,19 @@ function harness(configured: HostCommand[], roots: string[], options: { baseline
     exec,
   });
   loading = false;
+  const ctx = options.ctx ?? ({} as ExtensionToolContext);
   return {
     calls,
-    ctx: {} as ExtensionToolContext,
+    ctx,
     setFailed: (value: boolean) => { failed = value; },
     reset: () => installed.reset(),
-    run: (input, signal) => tools.get(HOST_TOOL).execute('id', input, signal, undefined, {} as ExtensionToolContext) as Promise<{ details: { status: string }; content: { text: string }[] }>,
+    run: (input, signal) => tools.get(HOST_TOOL).execute('id', input, signal, undefined, ctx) as Promise<{ details: { status: string }; content: { text: string }[] }>,
   };
 }
 
 const setup = () => {
   const root = mkdtempSync('/tmp/hiraishi-host-');
-  for (const dir of ['workspace', 'docs', 'cache', 'other']) mkdirSync(`${root}/${dir}`);
+  for (const dir of ['workspace', 'docs', 'cache', 'other', 'outside']) mkdirSync(`${root}/${dir}`);
   return { root, roots: [`${root}/workspace`], baseline: validateConfig({ readOnly: [`${root}/docs`], readWrite: [`${root}/cache`] }) };
 };
 
@@ -215,5 +216,86 @@ test('a host binary inside a writable grant is refused', async () => {
     const h = harness(inside, roots, { baseline });
     assert.match((await h.run({ command: 'hc', operation: 'list' })).content[0]!.text, /inside a writable grant/);
     assert.equal(h.calls.length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const uiContext = (select: (title: string, options: string[]) => Promise<string | undefined>) =>
+  ({ hasUI: true, ui: { select, notify() {}, setStatus() {} } } as unknown as ExtensionToolContext);
+
+test('a cwd inside the configured write ceiling runs without asking and child grants carry no ceiling', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const h = harness(commands, roots, {
+      baseline,
+      ceiling: { networkMode: 'http-get', readOnly: [`${root}/docs`], readWrite: [`${root}/cache`, `${root}/other`] },
+    });
+    const started = await h.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/other`, task: 't', grants: JSON.stringify({ readOnly: [`${root}/docs`] }) });
+    assert.equal(started.details.status, 'complete');
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0]!.args[5], `${root}/other`);
+    const child = JSON.parse(h.calls[0]!.args[10]!);
+    assert.equal(child.noHostCommands, true);
+    assert(!('maxReadOnly' in child));
+    assert(!('maxReadWrite' in child));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a cwd outside the write ceiling asks the user with the command, cwd, child grants and task', async () => {
+  const { root, roots, baseline } = setup();
+  try {
+    const prompts: string[] = [];
+    const h = harness(commands, roots, {
+      baseline,
+      ceiling: { networkMode: 'http-get', readOnly: [`${root}/docs`], readWrite: [`${root}/cache`] },
+      ctx: uiContext(async (title, options) => {
+        prompts.push(title);
+        assert.deepEqual(options, ['Run in this directory', 'Refuse']);
+        return 'Run in this directory';
+      }),
+    });
+    const started = await h.run({ command: 'hc', operation: 'run', name: 'fix', cwd: `${root}/outside`, task: 'Fix\tit\nnow', grants: JSON.stringify({ readOnly: [`${root}/docs`] }) });
+    assert.equal(started.details.status, 'complete');
+    assert.equal(prompts.length, 1);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0]!.args[5], `${root}/outside`);
+    const title = prompts[0]!;
+    assert.match(title, /Command: hc run/);
+    assert(title.includes(`Working directory: ${root}/outside`));
+    assert(title.includes(h.calls[0]!.args[10]!), 'the dialog shows the grants that the child actually receives');
+    assert.match(title, /Task: Fix\\u\{9\}it\\u\{a\}now/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a refused or unavailable outside workspace blocks, and a dismissed dialog cancels', async () => {
+  const { root, roots, baseline } = setup();
+  const scope = { networkMode: 'http-get' as const, readOnly: [`${root}/docs`], readWrite: [`${root}/cache`] };
+  const input = (cwd: string) => ({ command: 'hc', operation: 'run', name: 'fix', cwd, task: 't' });
+  try {
+    const refused = harness(commands, roots, { baseline, ceiling: scope, ctx: uiContext(async () => 'Refuse') });
+    const blocked = await refused.run(input(`${root}/outside`));
+    assert.equal(blocked.details.status, 'blocked');
+    assert.match(blocked.content[0]!.text, /refused/);
+    assert.equal(refused.calls.length, 0);
+
+    const closed = harness(commands, roots, { baseline, ceiling: scope });
+    const unavailable = await closed.run(input(`${root}/outside`));
+    assert.equal(unavailable.details.status, 'blocked');
+    assert.match(unavailable.content[0]!.text, /write ceiling/);
+    assert.match(unavailable.content[0]!.text, /maxReadWrite/);
+    assert.match(unavailable.content[0]!.text, /read-only grant/);
+    assert.equal(closed.calls.length, 0);
+
+    const dismissed = harness(commands, roots, { baseline, ceiling: scope, ctx: uiContext(async () => undefined) });
+    const cancelled = await dismissed.run(input(`${root}/outside`));
+    assert.equal(cancelled.details.status, 'cancelled');
+    assert.equal(dismissed.calls.length, 0);
+
+    const prompts: string[] = [];
+    const missing = harness(commands, roots, { baseline, ceiling: scope, ctx: uiContext(async title => { prompts.push(title); return 'Run in this directory'; }) });
+    const absent = await missing.run(input(`${root}/outside/missing`));
+    assert.equal(absent.details.status, 'blocked');
+    assert.match(absent.content[0]!.text, /not an existing directory/);
+    assert.equal(prompts.length, 0);
+    assert.equal(missing.calls.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

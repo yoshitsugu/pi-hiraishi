@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { ExtensionAPI, ExtensionToolContext, ToolInfo } from '@earendil-works/pi-coding-agent';
-import { canonicalGrants, canonicalPath, ceilingViolations, networkRank, parseGrants, within, type Ceiling, type Config, type Grants, type HostCommand, type HostOperation } from './policy.ts';
+import { canonicalPath, ceilingViolations, networkRank, parseGrants, within, type Ceiling, type Config, type Grants, type HostCommand, type HostOperation } from './policy.ts';
 
 export const HOST_TOOL = 'hiraishi_host';
 
@@ -27,7 +27,7 @@ const parameters = {
     command: { type: 'string', description: 'Configured host command name (hostCommands in the Hiraishi configuration).' },
     operation: { type: 'string', description: 'Configured operation of that command.' },
     name: { type: 'string', description: 'Child name for operations that take {name}: 1-32 of a-z, 0-9, - or _.' },
-    cwd: { type: 'string', description: 'Existing directory for {cwd}. It becomes the child workspace and must stay inside this session workspace or its write grants.' },
+    cwd: { type: 'string', description: 'Existing directory for {cwd}. It becomes the child workspace. It must stay inside this session workspace, its write grants, or the configured write ceiling; otherwise the user is asked to approve it.' },
     task: { type: 'string', maxLength: textLimit, description: 'Text for {task}. It cannot begin with - or @, which the started program could read as an option or file argument.' },
     grants: { type: 'string', description: 'Optional JSON permissions for {grants}, same shape as --hiraishi-grants. They are checked and then tightened against the session ceiling before the child starts.' },
     lines: { type: 'integer', minimum: 0, maximum: 2000, description: 'Value for {lines}.' },
@@ -36,7 +36,9 @@ const parameters = {
 };
 const result = (status: string, text: string) => ({ content: [{ type: 'text' as const, text }], details: { status } });
 const clip = (text: string) => text.length > outputLimit ? text.slice(0, outputLimit) + '\n[Output truncated at 32,000 characters.]' : text;
+const clean = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ch => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
 const unique = (paths: string[]) => [...new Set(paths.map(canonicalPath))];
+class Cancelled extends Error {}
 
 function request(value: unknown): Request {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid host request');
@@ -95,56 +97,62 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
     });
   };
 
-  const substitute = (template: string[], request: Request, operation: HostOperation, scope: HostScope, timeout: number) => {
-    const argv: string[] = [];
-    for (const entry of template) {
-      const placeholder = entry.match(/^\{([a-z]+)\}$/)?.[1];
-      if (!placeholder) { argv.push(entry); continue; }
-      switch (placeholder) {
-        case 'name':
-          if (!request.name) throw new Error(`${operation.name} requires name`);
-          argv.push(request.name);
-          break;
-        case 'cwd': {
-          const requested = request.cwd ?? scope.writable[0]!;
-          const cwd = canonicalPath(requested);
-          let directory = false;
-          try { directory = statSync(cwd).isDirectory(); } catch { directory = false; }
-          if (!directory || !scope.writable.some(root => within(cwd, canonicalPath(root))))
-            throw new Error(`cwd ${requested} is outside this session's writable workspace. A child workspace is writable, so it cannot be a read-only grant.`);
-          argv.push(cwd);
-          break;
-        }
-        case 'task':
-          if (!request.task?.trim()) throw new Error(`${operation.name} requires task`);
-          // A leading - or @ would be parsed by the started program as an option or a file argument.
-          if (/^[-@]/.test(request.task.trimStart())) throw new Error('task must not begin with - or @');
-          argv.push(request.task);
-          break;
-        case 'grants': {
-          let requested: Grants | undefined;
-          if (request.grants) {
-            requested = parseGrants(request.grants);
-            const violations = ceilingViolations(requested, scope.ceiling);
-            if (violations.length) throw new Error(JSON.stringify({ reason: 'Requested child permissions exceed this session ceiling.', violations, nextStep: 'Request only permissions within the ceiling, or ask the user to widen the configuration.' }));
-          }
-          argv.push(childGrants(requested, scope, request));
-          break;
-        }
-        case 'lines':
-          argv.push(String(request.lines ?? 0));
-          break;
-        case 'timeout':
-          argv.push(String(timeout));
-          break;
-        case 'hiraishi':
-          argv.push(options.hiraishiPath);
-          break;
-        default:
-          throw new Error(`Unsupported placeholder {${placeholder}}`);
-      }
+  const substitute = async (template: string[], request: Request, operation: HostOperation, commandName: string, scope: HostScope, timeout: number, signal: AbortSignal | undefined, ctx: ExtensionToolContext, check: () => void) => {
+    const used = new Set(template.flatMap(entry => entry.match(/\{[a-z]+\}/g) ?? []));
+    const values = new Map<string, string>();
+    if (used.has('{name}')) {
+      if (!request.name) throw new Error(`${operation.name} requires name`);
+      values.set('{name}', request.name);
     }
-    return argv;
+    if (used.has('{task}')) {
+      if (!request.task?.trim()) throw new Error(`${operation.name} requires task`);
+      // A leading - or @ would be parsed by the started program as an option or a file argument.
+      if (/^[-@]/.test(request.task.trimStart())) throw new Error('task must not begin with - or @');
+      values.set('{task}', request.task);
+    }
+    if (used.has('{lines}')) values.set('{lines}', String(request.lines ?? 0));
+    if (used.has('{timeout}')) values.set('{timeout}', String(timeout));
+    if (used.has('{hiraishi}')) values.set('{hiraishi}', options.hiraishiPath);
+    if (used.has('{grants}')) {
+      let requested: Grants | undefined;
+      if (request.grants) {
+        requested = parseGrants(request.grants);
+        const violations = ceilingViolations(requested, scope.ceiling);
+        if (violations.length) throw new Error(JSON.stringify({ reason: 'Requested child permissions exceed this session ceiling.', violations, nextStep: 'Request only permissions within the ceiling, or ask the user to widen the configuration.' }));
+      }
+      values.set('{grants}', childGrants(requested, scope, request));
+    }
+    check();
+    if (used.has('{cwd}')) {
+      const requested = request.cwd ?? scope.writable[0]!;
+      const cwd = canonicalPath(requested);
+      let directory = false;
+      try { directory = statSync(cwd).isDirectory(); } catch { directory = false; }
+      if (!directory) throw new Error(`cwd ${requested} is not an existing directory.`);
+      const writable = scope.writable.some(root => within(cwd, canonicalPath(root)));
+      if (!writable && !scope.ceiling.readWrite.some(root => within(cwd, canonicalPath(root)))) {
+        if (!ctx.hasUI) throw new Error(`cwd ${requested} is outside this session's writable workspace and write ceiling. A child workspace is writable, so it cannot be a read-only grant. Ask the user to add it to maxReadWrite in the Hiraishi configuration.`);
+        const grants = values.get('{grants}') ?? '(not passed)';
+        const task = (request.task ?? '').trim().slice(0, 240);
+        const choice = await ctx.ui.select([
+          `Hiraishi host command needs a workspace outside this session\nCommand: ${clean(commandName)} ${clean(operation.name)}`,
+          `Working directory: ${clean(cwd)}`,
+          `Child grants: ${clean(grants.length > 1200 ? `${grants.slice(0, 1200)}…` : grants)}`,
+          `Task: ${task ? clean(task) : '(none)'}`,
+        ].join('\n'), ['Run in this directory', 'Refuse'], signal ? { signal } : undefined);
+        if (choice !== 'Run in this directory') {
+          if (!choice || signal?.aborted) throw new Cancelled();
+          throw new Error(`User refused to use cwd ${cwd} for ${commandName} ${operation.name}.`);
+        }
+      }
+      values.set('{cwd}', cwd);
+    }
+    return template.map(entry => {
+      const name = entry.match(/^\{([a-z]+)\}$/)?.[1];
+      if (!name) return entry;
+      if (!values.has(`{${name}}`)) throw new Error(`Unsupported placeholder {${name}}`);
+      return values.get(`{${name}}`)!;
+    });
   };
 
   const spawn = async (bin: string, argv: string[], timeout: number, cwd: string, signal?: AbortSignal) => {
@@ -160,7 +168,7 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
   pi.registerTool({
     name: HOST_TOOL, label: 'Host command', parameters, executionMode: 'sequential',
     description: 'Run a host command that the Hiraishi configuration explicitly allows, with fixed argv templates. Each operation maps typed arguments onto placeholders such as {name}, {cwd} or {grants}; the model cannot choose the binary, add flags or use a shell, and task text cannot start with - or @. Every child grant is rewritten against this session ceiling before the child starts. When nothing is configured this tool reports that no host commands are available.',
-    promptGuidelines: ['Use hiraishi_host only for the operations the configuration lists; bash cannot reach host-only tools from inside the sandbox. Pass cwd per task so each child gets its own workspace; it must be writable in this session. Keep grants within the session ceiling. Read results back with the configured read operation.'],
+    promptGuidelines: ['Use hiraishi_host only for the operations the configuration lists; bash cannot reach host-only tools from inside the sandbox. Pass cwd per task so each child gets its own workspace; it must be writable in this session or covered by the configured write ceiling. Keep grants within the session ceiling. Read results back with the configured read operation.'],
     reachesTools: () => [],
     async execute(_id, input, signal, _onUpdate, ctx) {
       if (!owns(pi.getAllTools().find(tool => tool.name === HOST_TOOL))) throw new Error('Hiraishi host bridge was replaced; execution refused');
@@ -178,13 +186,14 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
         const bin = canonicalPath(command.path);
         if (scope.writable.some(root => within(bin, canonicalPath(root)))) throw new Error(`Host command ${command.name} resolves inside a writable grant: ${bin}`);
         const timeout = Math.min(p.timeoutSeconds ?? operation.timeoutSeconds ?? 120, operation.timeoutSeconds ?? 3600);
-        const argv = substitute(operation.argv, p, operation, scope, timeout);
         const tracked = started.get(command.name) ?? new Set<string>();
         const usesName = used.has('{name}');
-        if (usesName && command.starts && operation.name !== command.starts && (!p.name || !tracked.has(p.name)))
-          throw new Error(`Unknown child ${p.name}. This bridge only controls children it started.`);
-        if (usesName && command.starts === operation.name && p.name && tracked.has(p.name))
-          throw new Error(`A child named ${p.name} already exists for ${command.name}.`);
+        const argv = await substitute(operation.argv, p, operation, command.name, scope, timeout, signal, ctx, () => {
+          if (usesName && command.starts && operation.name !== command.starts && (!p.name || !tracked.has(p.name)))
+            throw new Error(`Unknown child ${p.name}. This bridge only controls children it started.`);
+          if (usesName && command.starts === operation.name && p.name && tracked.has(p.name))
+            throw new Error(`A child named ${p.name} already exists for ${command.name}.`);
+        });
         const outcome = await spawn(bin, argv, timeout, '/', signal);
         const text = outcome.output || `${command.name} ${operation.name} finished without output.`;
         if (outcome.aborted) return result('cancelled', 'Host command cancelled.');
@@ -194,7 +203,7 @@ export function installHostBridge(pi: ExtensionAPI, options: HostOptions) {
           started.set(command.name, tracked);
         }
         return result('complete', clip(text));
-      } catch (error) { return result('blocked', String((error as Error).message).slice(0, 4000)); }
+      } catch (error) { return result(error instanceof Cancelled || signal?.aborted ? 'cancelled' : 'blocked', error instanceof Cancelled ? 'Host command cancelled.' : String((error as Error).message).slice(0, 4000)); }
     },
   });
 

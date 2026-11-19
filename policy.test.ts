@@ -5,7 +5,7 @@ import { runtimePolicy, allowsHost, hostDecision, validateConfig, parseJsonc, pa
 
 test('configuration rejects legacy classifier settings and malformed grants', () => {
   for (const value of [null, [], { endpoint: 'https://classifier' }, { networkMode: 'all' }, { readOnly: ['relative'] }, { readWrite: ['/'] , unknown: true }, { denyRead: ['/tmp/*'] }, { socatPath: 'socat' }]) assert.throws(() => validateConfig(value));
-  assert.deepEqual(validateConfig({}), { networkMode: 'off', maxNetworkMode: 'http-all', readOnly: [], readWrite: [], denyRead: [] });
+  assert.deepEqual(validateConfig({}), { networkMode: 'off', maxNetworkMode: 'http-all', readOnly: [], readWrite: [], maxReadOnly: [], maxReadWrite: [], denyRead: [] });
   assert.deepEqual(parseJsonc('{/*comment*/ "url":"http://example.com", // comment\n"value":1}'), { url: 'http://example.com', value: 1 });
 });
 test('open HTTP sessions refuse literal IPs and localhost before the SRT DNS exemption', () => {
@@ -249,5 +249,53 @@ test('grants are canonicalized so a later symlink swap cannot widen the grant', 
     assert.deepEqual(mergeGrants(baseline, grants).readOnly, [`${root}/docs`, `${root}/docs/inner`]);
     const escaping = parseGrants(JSON.stringify({ readOnly: [`${root}/outside`] }));
     assert.equal(ceilingViolations(escaping, ceilingOf(baseline)).length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('configured path ceilings accept grants without granting them to the session', () => {
+  const root = mkdtempSync('/tmp/hiraishi-path-ceiling-');
+  try {
+    for (const dir of ['project', 'docs', 'secret', 'cache']) mkdirSync(`${root}/${dir}`);
+    const baseline = validateConfig({
+      readOnly: [`${root}/docs`], maxReadOnly: [`${root}/secret`], maxReadWrite: [`${root}/cache`],
+    });
+    assert.deepEqual(baseline.maxReadOnly, [`${root}/secret`]);
+    assert.deepEqual(baseline.maxReadWrite, [`${root}/cache`]);
+    assert.deepEqual(baseline.readOnly, [`${root}/docs`]);
+    assert.deepEqual(baseline.readWrite, []);
+    assert.throws(() => validateConfig({ maxReadOnly: ['relative'] }));
+    assert.throws(() => validateConfig({ maxReadWrite: [`${root}/*`] }));
+    assert.throws(() => validateConfig({ maxReadOnly: [42] }));
+
+    const ceiling = ceilingOf(baseline, `${root}/project`);
+    assert.deepEqual(ceiling.readOnly, [`${root}/docs`, `${root}/secret`, `${root}/cache`, `${root}/project`]);
+    assert.deepEqual(ceiling.readWrite, [`${root}/cache`, `${root}/project`]);
+
+    const inside = parseGrants(JSON.stringify({ readOnly: [`${root}/secret`, `${root}/cache`] }));
+    assert.deepEqual(ceilingViolations(inside, ceiling), []);
+    const writeCeiling = parseGrants(JSON.stringify({ readWrite: [`${root}/cache`] }));
+    assert.deepEqual(ceilingViolations(writeCeiling, ceiling), []);
+    assert.equal(ceilingViolations(parseGrants(JSON.stringify({ readWrite: [`${root}/secret`] })), ceiling).length, 1);
+    assert.equal(ceilingViolations(parseGrants(JSON.stringify({ readOnly: [`${root}/other`] })), ceiling).length, 1);
+
+    const merged = mergeGrants(baseline, inside);
+    assert.deepEqual(merged.maxReadOnly, [`${root}/secret`]);
+    assert.deepEqual(merged.maxReadWrite, [`${root}/cache`]);
+    assert.deepEqual(merged.readOnly, [`${root}/docs`, `${root}/secret`, `${root}/cache`]);
+    assert.deepEqual(merged.readWrite, []);
+
+    const restricted = restrictGrants(baseline, parseGrants(JSON.stringify({ noHostCommands: true })));
+    assert.deepEqual(restricted.maxReadOnly, []);
+    assert.deepEqual(restricted.maxReadWrite, []);
+    assert.deepEqual(restricted.readOnly, [`${root}/docs`]);
+
+    const command = { name: 'hc', path: '/usr/bin/hc', starts: 'run', operations: [{ name: 'run', argv: ['run', '{grants}'] }] };
+    const delegated = mergeGrants(validateConfig({ ...baseline, hostCommands: [command] }), parseGrants(JSON.stringify({ noHostCommands: true })));
+    assert.equal(delegated.hostCommands, undefined);
+    assert.deepEqual(delegated.maxReadOnly, [], 'a delegated child must not inherit its own configuration ceiling');
+    assert.deepEqual(delegated.maxReadWrite, []);
+
+    assert.throws(() => parseGrants(JSON.stringify({ maxReadWrite: [`${root}/cache`] })), /configuration-only/);
+    assert(restrictGrants(baseline, parseGrants('{}')).maxReadWrite.includes(`${root}/cache`));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

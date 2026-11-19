@@ -14,6 +14,8 @@ export interface Config {
   maxNetworkMode: NetworkMode;
   readOnly: string[];
   readWrite: string[];
+  maxReadOnly: string[];
+  maxReadWrite: string[];
   denyRead: string[];
   socatPath?: string;
   hostCommands?: HostCommand[];
@@ -40,13 +42,13 @@ export function parseJsonc(text: string): unknown {
 export function validateConfig(value: unknown): Config {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Hiraishi configuration');
   const c = value as Record<string, unknown>;
-  const unknown = Object.keys(c).filter(k => !['networkMode', 'maxNetworkMode', 'readOnly', 'readWrite', 'denyRead', 'socatPath', 'hostCommands'].includes(k));
+  const unknown = Object.keys(c).filter(k => !['networkMode', 'maxNetworkMode', 'readOnly', 'readWrite', 'maxReadOnly', 'maxReadWrite', 'denyRead', 'socatPath', 'hostCommands'].includes(k));
   if (unknown.length) throw new Error(`Invalid Hiraishi configuration: unknown setting ${unknown.join(', ')} (old classifier settings are no longer supported)`);
   if (c.networkMode !== undefined && !isNetworkMode(c.networkMode) || c.maxNetworkMode !== undefined && !isNetworkMode(c.maxNetworkMode))
     throw new Error('Invalid Hiraishi configuration: networkMode and maxNetworkMode take off, http-get or http-all');
-  const result: Config = { networkMode: c.networkMode as NetworkMode ?? 'off', maxNetworkMode: c.maxNetworkMode as NetworkMode ?? 'http-all', readOnly: [], readWrite: [], denyRead: [] };
+  const result: Config = { networkMode: c.networkMode as NetworkMode ?? 'off', maxNetworkMode: c.maxNetworkMode as NetworkMode ?? 'http-all', readOnly: [], readWrite: [], maxReadOnly: [], maxReadWrite: [], denyRead: [] };
   if (networkRank(result.networkMode) > networkRank(result.maxNetworkMode)) throw new Error('Invalid Hiraishi configuration: networkMode cannot exceed maxNetworkMode');
-  for (const name of ['readOnly', 'readWrite', 'denyRead'] as const) {
+  for (const name of ['readOnly', 'readWrite', 'maxReadOnly', 'maxReadWrite', 'denyRead'] as const) {
     const values = c[name] ?? [];
     if (!Array.isArray(values) || values.length > 64 || values.some(p => typeof p !== 'string' || p.length > 4096 ||
         !p.length || !(isAbsolute(p) || p.startsWith('~/')) || /[\x00-\x1f\x7f*?[\]{}]/.test(p))) throw new Error(`Invalid ${name}: use literal absolute paths or ~/ paths`);
@@ -117,8 +119,8 @@ export interface Ceiling { networkMode: NetworkMode; readOnly: string[]; readWri
 export const networkRank = (mode: NetworkMode) => mode === 'off' ? 0 : mode === 'http-get' ? 1 : 2;
 export const ceilingOf = (config: Config, cwd?: string): Ceiling => ({
   networkMode: config.maxNetworkMode,
-  readOnly: cwd ? [...config.readOnly, cwd] : config.readOnly,
-  readWrite: cwd ? [...config.readWrite, cwd] : config.readWrite,
+  readOnly: [...config.readOnly, ...config.maxReadOnly, ...config.maxReadWrite, ...(cwd ? [cwd] : [])],
+  readWrite: [...config.readWrite, ...config.maxReadWrite, ...(cwd ? [cwd] : [])],
 });
 
 const pathList = (value: unknown, name: string) => {
@@ -134,6 +136,7 @@ export function parseGrants(json: string): Grants {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid --hiraishi-grants: expected a JSON object');
   const raw = value as Record<string, unknown>;
   if ('socatPath' in raw || 'hostCommands' in raw) throw new Error('Invalid --hiraishi-grants: host-side commands and socatPath cannot be set from the command line');
+  if ('maxReadOnly' in raw || 'maxReadWrite' in raw) throw new Error('Invalid --hiraishi-grants: maxReadOnly and maxReadWrite are configuration-only ceilings');
   const { replace, cwd: expectedCwd, noHostCommands, ...rest } = raw;
   if (expectedCwd !== undefined && (typeof expectedCwd !== 'string' || !isAbsolute(expectedCwd))) throw new Error('Invalid --hiraishi-grants: cwd must be an absolute path');
   if (noHostCommands !== undefined && typeof noHostCommands !== 'boolean') throw new Error('Invalid --hiraishi-grants: noHostCommands must be a boolean');
@@ -215,6 +218,9 @@ export function mergeGrants(baseline: Config, grants: Grants): Config {
     maxNetworkMode: ceiling,
     readOnly: grants.replace?.readOnly !== undefined ? unique(grants.replace.readOnly) : unique([...baseline.readOnly, ...(grants.readOnly ?? [])]),
     readWrite: grants.replace?.readWrite !== undefined ? unique(grants.replace.readWrite) : unique([...baseline.readWrite, ...(grants.readWrite ?? [])]),
+    // A host-launched child gets exactly the grants the parent passed, so its own configuration cannot widen them.
+    maxReadOnly: grants.noHostCommands ? [] : unique(baseline.maxReadOnly),
+    maxReadWrite: grants.noHostCommands ? [] : unique(baseline.maxReadWrite),
     denyRead: unique([...baseline.denyRead, ...(grants.denyRead ?? [])]),
     socatPath: baseline.socatPath,
     ...(!grants.noHostCommands && baseline.hostCommands ? { hostCommands: baseline.hostCommands } : {}),

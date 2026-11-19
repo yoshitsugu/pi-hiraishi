@@ -114,3 +114,26 @@ test('CLI grants add to the baseline, respect maxNetworkMode, and ask only when 
     await h.handlers.get('session_shutdown')();
   }finally{if(old===undefined)delete process.env.HIRAISHI_CONFIG;else process.env.HIRAISHI_CONFIG=old;rmSync(root,{recursive:true,force:true});}
 });
+
+test('configured path ceilings accept grants without a permission dialog', async () => {
+  const root=mkdtempSync('/tmp/hiraishi-path-ceiling-ext-');
+  for(const dir of ['docs','extra','cache'])mkdirSync(`${root}/${dir}`,{recursive:true});
+  const old=process.env.HIRAISHI_CONFIG;process.env.HIRAISHI_CONFIG=`${root}/config`;
+  writeFileSync(process.env.HIRAISHI_CONFIG,JSON.stringify({ readOnly: [`${root}/docs`], maxReadOnly: [`${root}/extra`], maxReadWrite: [`${root}/cache`] }));
+  const asked: string[] = [];
+  try {
+    const h=harness({ 'hiraishi-grants': JSON.stringify({ readOnly: [`${root}/extra`], readWrite: [`${root}/cache`] }) });
+    h.ctx.hasUI=true;h.ctx.ui.select=async (title:string)=>{asked.push(title);return 'Refuse to start';};
+    await h.handlers.get('session_start')({},h.ctx);
+    assert.equal(asked.length,0);
+    assert(!h.notices.some(s=>s.includes('exceed the session ceiling')));
+    await h.handlers.get('session_shutdown')();
+
+    const outside=harness({ 'hiraishi-grants': JSON.stringify({ readWrite: [`${root}/outside`] }) });
+    outside.ctx.hasUI=true;outside.ctx.ui.select=async (title:string)=>{asked.push(title);return 'Refuse to start';};
+    await outside.handlers.get('session_start')({},outside.ctx);
+    assert.equal(asked.length,1);
+    assert.match(asked[0]!,/session ceiling/);
+    await outside.handlers.get('session_shutdown')();
+  }finally{if(old===undefined)delete process.env.HIRAISHI_CONFIG;else process.env.HIRAISHI_CONFIG=old;rmSync(root,{recursive:true,force:true});}
+});
