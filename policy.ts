@@ -210,25 +210,6 @@ export function ceilingViolations(grants: Grants, ceiling: Ceiling): string[] {
   return violations;
 }
 
-// Merge-time normalization also bounds any later symlink swap.
-export function canonicalGrants(grants: Grants): Grants {
-  const exact = grants.replace;
-  return {
-    ...(grants.networkMode ? { networkMode: grants.networkMode } : {}),
-    ...(grants.maxNetworkMode ? { maxNetworkMode: grants.maxNetworkMode } : {}),
-    ...(grants.readOnly ? { readOnly: grants.readOnly.map(canonicalPath) } : {}),
-    ...(grants.readWrite ? { readWrite: grants.readWrite.map(canonicalPath) } : {}),
-    ...(grants.denyRead ? { denyRead: grants.denyRead.map(canonicalPath) } : {}),
-    ...(grants.hostCommands ? { hostCommands: [...new Set(grants.hostCommands)] } : {}),
-    ...(grants.expectedCwd ? { cwd: canonicalPath(grants.expectedCwd) } : {}),
-    ...(grants.noHostCommands ? { noHostCommands: grants.noHostCommands } : {}),
-    ...(exact ? { replace: {
-      ...(exact.readOnly ? { readOnly: exact.readOnly.map(canonicalPath) } : {}),
-      ...(exact.readWrite ? { readWrite: exact.readWrite.map(canonicalPath) } : {}),
-    } } : {}),
-  };
-}
-
 // A host command keep-list may only name configured commands, and never one that starts another child.
 function selectHostCommands(baseline: Config, grants: Grants): HostCommand[] | undefined {
   const requested = grants.hostCommands;
