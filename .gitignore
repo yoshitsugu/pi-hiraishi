@@ -1,6 +1,8 @@
 node_modules/
 config.json
 allowlist.json
+host/publish-allow.json
+.review-out/
 evaluation.json
 evaluation-*.json
 !evaluation.sample.json

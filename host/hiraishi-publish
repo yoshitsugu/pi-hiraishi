@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf 'hiraishi-publish: %s\n' "$*" >&2; exit 1; }
+
+# Reopening /dev/stderr fails when stderr is a pipe, so duplicate the descriptor once.
+errdst=9
+exec 9>/dev/null
+if [[ -n ${HIRAISHI_PUBLISH_DEBUG:-} ]]; then
+  exec 9>&2
+fi
+
+for tool in node git timeout realpath; do
+  command -v "$tool" >/dev/null 2>&1 || die "required command is missing: $tool"
+done
+
+# The timeout re-exec keeps one limit over every git call. It is not a security boundary: the caller already runs this
+# script and can invoke the body directly.
+if [[ "${HIRAISHI_PUBLISH_INNER:-}" != 1 ]]; then
+  HIRAISHI_PUBLISH_INNER=1 exec timeout --kill-after=10 300 bash "$0" "$@"
+fi
+
+readonly MAX_BUNDLE_BYTES=$((50 * 1024 * 1024))
+readonly MAX_COMMITS=50
+
+SCRIPT_DIR=$( { cd -- "${BASH_SOURCE[0]%/*}" && pwd -P; } 2>&"$errdst") || die 'cannot resolve the script directory'
+readonly SCRIPT_DIR
+ALLOWLIST="$SCRIPT_DIR/publish-allow.json"
+readonly ALLOWLIST
+
+[[ $# -eq 2 ]] || die 'usage: hiraishi-publish <workdir> <bundle>'
+case $1 in *[[:cntrl:]]*) die 'workdir contains control characters' ;; esac
+case $2 in *[[:cntrl:]]*) die 'bundle contains control characters' ;; esac
+[[ $1 = /* ]] || die 'workdir must be an absolute path'
+[[ $2 = /* ]] || die 'bundle must be an absolute path'
+[[ -d $1 ]] || die "workdir is not a directory: $1"
+[[ -f $2 ]] || die "bundle is not a file: $2"
+
+workdir=$(realpath -e -- "$1" 2>&"$errdst") || die "cannot resolve workdir: $1"
+[[ $workdir != / ]] || die 'workdir cannot be /'
+
+[[ -f $ALLOWLIST ]] || die 'allowlist not found'
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/hiraishi-publish.XXXXXX" 2>&"$errdst") || die 'cannot create a temporary directory'
+trap 'rm -rf -- "${tmp:-}" 2>/dev/null' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+status=0
+remote=$(node -e '
+const fs = require("fs");
+const [file, want] = process.argv.slice(1);
+let data;
+try { data = JSON.parse(fs.readFileSync(file, "utf8")); }
+catch { console.error("invalid allowlist"); process.exit(2); }
+if (!data || !Array.isArray(data.repos)) { console.error("invalid allowlist"); process.exit(2); }
+const hits = data.repos.filter(repo => repo && typeof repo.path === "string" && repo.path === want);
+if (hits.length !== 1) { console.error("work directory is not allowed"); process.exit(3); }
+const remote = hits[0].remote;
+if (typeof remote !== "string" || !remote.length || /[\s\x00-\x1f\x7f]/.test(remote)) { console.error("invalid allowlist entry"); process.exit(4); }
+process.stdout.write(remote);
+' "$ALLOWLIST" "$workdir" 2>&"$errdst") || status=$?
+if [[ $status -ne 0 ]]; then
+  if [[ $status -eq 3 ]]; then
+    die 'work directory is not allowed'
+  fi
+  die 'invalid allowlist'
+fi
+
+[[ -n $remote ]] || die 'invalid remote in allowlist'
+[[ $remote != -* ]] || die 'invalid remote in allowlist'
+case $remote in
+  *[[:space:]]*|*[[:cntrl:]]*) die 'invalid remote in allowlist' ;;
+esac
+
+{ exec 3< "$2"; } 2>&"$errdst" || die 'cannot open bundle'
+[[ -f /proc/self/fd/3 ]] || die 'bundle is not a regular file'
+bundle_real=$(readlink -f /proc/self/fd/3 2>&"$errdst") || die 'cannot resolve bundle'
+case $bundle_real in
+  "$workdir"/*) ;;
+  *) die 'bundle must be inside the work directory' ;;
+esac
+
+bundle_copy="$tmp/bundle"
+head -c $((MAX_BUNDLE_BYTES + 1)) <&3 >"$bundle_copy" 2>&"$errdst" || die 'cannot read bundle'
+exec 3<&-
+size=$(wc -c <"$bundle_copy" 2>&"$errdst") || die 'cannot read bundle'
+(( size <= MAX_BUNDLE_BYTES )) || die "bundle is larger than ${MAX_BUNDLE_BYTES} bytes"
+
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+
+repo="$tmp/repo.git"
+
+init_repo() {
+  git -c init.defaultBranch=main init --quiet --bare "$repo" >/dev/null 2>&"$errdst"
+}
+init_repo || die 'could not initialize a temporary repository'
+
+g() {
+  git -C "$repo" \
+    -c core.hooksPath=/dev/null \
+    -c protocol.allow=never \
+    -c protocol.https.allow=always \
+    -c protocol.ssh.allow=always \
+    -c protocol.file.allow=always \
+    -c fetch.recurseSubmodules=false \
+    -c fetch.unpackLimit=1 \
+    -c transfer.unpackLimit=1 \
+    -c submodule.recurse=false \
+    "$@" 2>&"$errdst"
+}
+
+g fetch --quiet --no-tags --no-recurse-submodules "$remote" HEAD >/dev/null ||
+  die 'could not fetch the default branch from the allowlisted remote'
+base=$(g rev-parse --verify 'FETCH_HEAD^{commit}') || die 'default branch is not a commit'
+
+g bundle verify "$bundle_copy" >/dev/null || die 'bundle verification failed'
+
+heads=$( { g bundle list-heads "$bundle_copy" | awk '{ print $1 }' | sort -u; } 2>&"$errdst") ||
+  die 'could not read the bundle heads'
+[[ -n $heads ]] || die 'bundle contains no heads'
+head_count=$( { printf '%s\n' "$heads" | wc -l; } 2>&"$errdst")
+[[ $head_count -eq 1 ]] || die 'bundle must contain exactly one head'
+tip=$heads
+[[ $tip =~ ^[0-9a-f]{40}$ ]] || die 'bundle head is not a supported commit id'
+
+g fetch --quiet --no-tags --no-recurse-submodules "$bundle_copy" "$tip:refs/hiraishi/bundle" >/dev/null ||
+  die 'could not fetch the bundle'
+fetched=$(g rev-parse --verify 'refs/hiraishi/bundle^{commit}') || die 'bundle head is not a commit'
+[[ $fetched == "$tip" ]] || die 'bundle head is not a commit'
+
+if g merge-base --is-ancestor "$base" "$tip"; then
+  :
+else
+  status=$?
+  if [[ $status -eq 1 ]]; then
+    die 'bundle head is not a descendant of the default branch tip'
+  fi
+  die 'could not compare histories'
+fi
+
+count=$(g rev-list --max-count=$((MAX_COMMITS + 1)) --count "$base..$tip") || die 'could not count commits'
+[[ $count =~ ^[0-9]+$ ]] || die 'could not count commits'
+(( count <= MAX_COMMITS )) || die "bundle contains more than ${MAX_COMMITS} commits"
+
+commits="$tmp/commits"
+{ g rev-list "$base..$tip" >"$commits"; } 2>&"$errdst" || die 'could not list commits'
+while IFS= read -r commit; do
+  raw="$tmp/commit"
+  { g cat-file commit "$commit" >"$raw"; } 2>&"$errdst" || die 'could not read a commit'
+  status=0
+  grep -F -e 'claude.ai/code/session' -e 'Claude-Session:' "$raw" >/dev/null 2>&"$errdst" || status=$?
+  case $status in
+    0) die "commit $commit contains a forbidden session marker" ;;
+    1) ;;
+    *) die 'could not inspect a commit' ;;
+  esac
+done <"$commits"
+
+random=$( { od -An -N4 -tx1 /dev/urandom | tr -d ' \n'; } 2>&"$errdst") || die 'cannot generate a random value'
+[[ $random =~ ^[0-9a-f]{8}$ ]] || die 'cannot generate a random value'
+branch="hiraishi/$(date -u +%Y%m%dT%H%M%SZ)-${tip:0:8}-$random"
+existing=$(g ls-remote --heads "$remote" "refs/heads/$branch") || die 'could not check the target branch on the remote'
+[[ -z $existing ]] || die "branch already exists on the remote: $branch"
+
+g push --quiet --no-follow-tags "--force-with-lease=refs/heads/$branch:" "$remote" "$tip:refs/heads/$branch" >/dev/null ||
+  die 'push failed'
+
+printf 'branch: %s\ntip: %s\ncommits: %s\n' "$branch" "$tip" "$count"

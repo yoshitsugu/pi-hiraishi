@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test policy.test.ts session.test.ts sandbox.test.ts extension.test.ts subagent.test.ts subagent-sandbox.test.ts host-bridge.test.ts footer.test.ts",
+    "test": "node --test policy.test.ts session.test.ts sandbox.test.ts extension.test.ts subagent.test.ts subagent-sandbox.test.ts host-bridge.test.ts footer.test.ts host/hiraishi-publish.test.ts",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
   },
   "pi": {
