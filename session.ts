@@ -47,13 +47,16 @@ export class SandboxSession {
   }
   changeMode(mode: NetworkMode): Promise<void> {
     if (networkRank(mode) > networkRank(this.ceilingMode)) return Promise.reject(new Error(`Network mode ${mode} exceeds this session's ceiling (${this.ceilingMode}); lower it with maxNetworkMode in the configuration`));
-    if (this.state !== 'ready') return Promise.reject(new Error(this.state === 'changing' ? 'Sandbox permissions are changing; retry later' : this.failure));
+    if (this.state !== 'ready') return Promise.reject(this.notReadyError());
     ++this.generation;
     this.state = 'changing';
     this.fail(new Error('Sandbox permissions changed; retry the operation'));
     return this.transitionTo(mode, true);
   }
   private assertHealthy() { if (this.state === 'failed') throw new Error(this.failure); }
+  private notReadyError(): Error {
+    return new Error(this.state === 'changing' ? 'Sandbox permissions are changing; retry later' : this.failure);
+  }
   private transitionTo(mode: NetworkMode, replace: boolean): Promise<void> {
     this.state = 'changing';
     const task = (async () => {
@@ -155,6 +158,10 @@ export class SandboxSession {
       child.send({ cwd: this.cwd, configPath: this.configPath, config: this.config, mode, runtimeRoot: root, temp, home, agentDir: this.agentDir, delegated: this.delegated });
     });
   }
+  private killGroup(pid: number) {
+    try { process.kill(-pid, 'SIGKILL'); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; }
+  }
   private killToolProcesses() {
     const failures: string[] = [];
     for (const [id, pid] of this.processes) {
@@ -176,11 +183,11 @@ export class SandboxSession {
           await Promise.race([exited, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Sandbox shutdown timed out')), 5000); })]);
         } finally {
           if (timer) clearTimeout(timer);
-          if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; } }
+          if (child.pid) this.killGroup(child.pid);
         }
       }
       // SRT's host-side relay children belong to the runner's process group.
-      if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; } }
+      if (child.pid) this.killGroup(child.pid);
       if (this.cleanupFailure) throw this.cleanupFailure;
       this.runner = undefined;
     }
@@ -188,7 +195,7 @@ export class SandboxSession {
     if (this.directory) { rmSync(this.directory, { recursive: true, force: true }); this.directory = undefined; }
   }
   request(request: Omit<Extract<Request, {op: 'bash'}>, 'id'> | FileRequest, options: { signal?: AbortSignal; onData?: (data: Buffer) => void } = {}) {
-    if (this.state !== 'ready') return Promise.reject(new Error(this.state === 'changing' ? 'Sandbox permissions are changing; retry later' : this.failure));
+    if (this.state !== 'ready') return Promise.reject(this.notReadyError());
     if (options.signal?.aborted) return Promise.reject(new Error('Tool execution cancelled'));
     if (request.op === 'bash' && request.timeout !== undefined && (!Number.isFinite(request.timeout) || request.timeout <= 0 || request.timeout > 3600)) return Promise.reject(new Error('Invalid timeout'));
     const id = ++this.nextId; const child = this.runner!;
