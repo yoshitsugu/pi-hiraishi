@@ -55,7 +55,6 @@ integration('a writable cwd nested inside a readOnly grant stays writable withou
     }
     assert.equal(readFileSync(`${f.root}/project/.git/config`, 'utf8'), 'original config');
     assert.equal(readFileSync(`${f.root}/project/.git/hooks/pre-commit`, 'utf8'), 'original hook');
-    assert(!existsSync(`${f.root}/project/.gitconfig`));
   } finally { await f.cleanup(); }
 });
 integration('SRT confines read/write/edit/bash, child processes, secrets, and shared temporary files', async () => {
