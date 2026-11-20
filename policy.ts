@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isIP } from 'node:net';
@@ -289,6 +289,22 @@ function strictPath(path: string): string {
   if (real !== path) throw new Error(`Grant path changed since it was validated; start a new session: ${path}`);
   return real;
 }
+// SRT applies read-only binds after writable binds, so an ancestor read grant must not cover a writable root.
+function expandReadGrant(dir: string, writableRoots: string[]): string[] {
+  if (writableRoots.includes(dir)) return [];
+  const descendants = writableRoots.filter(root => within(root, dir));
+  if (descendants.length === 0) return [dir];
+  let children: string[];
+  try { children = readdirSync(dir).sort(); }
+  catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot inspect readOnly grant while preserving writable directories: ${dir}: ${detail}`, { cause: error });
+  }
+  return children.flatMap(name => {
+    const child = join(dir, name);
+    return descendants.some(root => within(root, child)) ? expandReadGrant(child, descendants) : [child];
+  });
+}
 export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
   const { config, mode, temp, home } = input;
   const cwd = strictPath(input.cwd);
@@ -316,7 +332,8 @@ export function runtimePolicy(input: PolicyInput): SandboxRuntimeConfig {
       if (within(target, path)) throw new Error(`Install runtime and configuration outside writable directories: ${protectedPath}`);
     }
   }
-  const reads = [...systemReadPaths, dirname(process.execPath), input.srtRoot, ...(config.socatPath ? [config.socatPath] : []), ...userReads, ...writes].filter(existsSync);
+  const expandedReads = [...new Set(userReads.flatMap(path => expandReadGrant(path, writes)))];
+  const reads = [...systemReadPaths, dirname(process.execPath), input.srtRoot, ...(config.socatPath ? [config.socatPath] : []), ...expandedReads, ...writes].filter(existsSync);
   const denied = [...config.denyRead.map(canonicalPath), ...agentDirs.flatMap(dir => [join(dir, 'auth.json'), join(dir, 'models.json'), join(dir, 'sessions')]), join(hostHome, '.ssh'), join(hostHome, '.aws'), join(hostHome, '.gnupg'), join(hostHome, '.netrc'), canonicalPath(input.configPath), '/tmp/claude', '/private/tmp/claude'];
   return {
     filesystem: { denyRead: [literal('/'), ...denied.map(literal)], allowRead: reads.map(literal), allowWrite: writes.map(literal),

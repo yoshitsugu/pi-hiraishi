@@ -49,6 +49,7 @@ The session working directory is readable and writable, including deletion. Ever
 Paths:
 - Use absolute paths or `~/...`. Globs are rejected.
 - Grants must name existing directories.
+- A `readOnly` grant may contain the working directory or a `readWrite` directory: those writable roots stay writable, while their siblings under the grant remain read-only.
 - HOME and pi's state directory cannot be granted whole. Grant the specific subdirectories you need.
 
 Safety:

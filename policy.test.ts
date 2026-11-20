@@ -58,6 +58,20 @@ test('SRT policy combines method filtering with TLS and opaque tunnel refusal', 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('readOnly ancestors are expanded around every writable root', () => {
+  const root = mkdtempSync('/tmp/hiraishi-read-grants-');
+  try {
+    for (const dir of ['grant/project/nested', 'grant/project/other', 'grant/cache/sub', 'grant/cache/other', 'grant/read-only', 'outside', 'session/temp', 'session/home']) mkdirSync(`${root}/${dir}`, { recursive: true });
+    const grant = `${root}/grant`;
+    const config = validateConfig({ readOnly: [grant, `${grant}/read-only`, `${root}/outside`], readWrite: [`${grant}/cache/sub`] });
+    const policy = runtimePolicy({ cwd: `${grant}/project/nested`, temp: `${root}/session/temp`, home: `${root}/session/home`, configPath: `${root}/config`, runtimeRoot: '/opt/hiraishi', srtRoot: '/usr/lib/srt', mode: 'off', config });
+    const reads = policy.filesystem.allowRead!.map(entry => typeof entry === 'string' ? entry : entry.path);
+    for (const path of [`${grant}/project/other`, `${grant}/cache/other`, `${grant}/read-only`, `${root}/outside`, `${grant}/project/nested`, `${grant}/cache/sub`]) assert(reads.includes(path), path);
+    for (const path of [grant, `${grant}/project`, `${grant}/cache`]) assert(!reads.includes(path), path);
+    assert.equal(reads.filter(path => path === `${grant}/read-only`).length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('grants cannot expose session internals, HOME, or pi state, including aliases', async () => {
   const { homedir } = await import('node:os');
   const { symlinkSync } = await import('node:fs');

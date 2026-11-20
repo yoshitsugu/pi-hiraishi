@@ -27,6 +27,37 @@ async function fixture(config = {}) {
   try { await session.start(); } catch (e) { rmSync(root,{recursive:true,force:true}); throw e; }
   return { root, session, cleanup: async () => { await session.stop(); rmSync(root,{recursive:true,force:true}); } };
 }
+async function readOnlyAncestorFixture() {
+  const root = mkdtempSync('/tmp/hiraishi-readonly-ancestor-');
+  for (const d of ['project/.git/hooks', 'read-only']) mkdirSync(`${root}/${d}`, { recursive: true });
+  writeFileSync(`${root}/project/.git/config`, 'original config');
+  writeFileSync(`${root}/project/.git/hooks/pre-commit`, 'original hook');
+  writeFileSync(`${root}/read-only/sample`, 'reference');
+  const session = new SandboxSession(`${root}/project`, `${root}/config.json`, validateConfig({ ...(socatPath ? { socatPath } : {}), readOnly: [root] }));
+  try { await session.start(); } catch (e) { rmSync(root, { recursive: true, force: true }); throw e; }
+  return { root, session, cleanup: async () => { await session.stop(); rmSync(root, { recursive: true, force: true }); } };
+}
+integration('a writable cwd nested inside a readOnly grant stays writable without weakening git protections', async () => {
+  const f = await readOnlyAncestorFixture();
+  try {
+    const op = createOperations(f.session);
+    let output = '';
+    const started = await op.bash.exec('printf writable > output', f.session.cwd, { onData: d => { output += d; }, timeout: 5 });
+    assert.equal(started.exitCode, 0, output);
+    assert.equal(readFileSync(`${f.root}/project/output`, 'utf8'), 'writable');
+    assert.equal((await op.read.readFile(`${f.root}/read-only/sample`)).toString(), 'reference');
+    await assert.rejects(op.write.writeFile(`${f.root}/read-only/sample`, 'overwrite'));
+    assert.equal(readFileSync(`${f.root}/read-only/sample`, 'utf8'), 'reference');
+    for (const command of [': > .git/config', ': > .gitconfig', ': > .git/hooks/pre-commit']) {
+      output = '';
+      const result = await op.bash.exec(command, f.session.cwd, { onData: d => { output += d; }, timeout: 5 });
+      assert.notEqual(result.exitCode, 0, `${command}: ${output}`);
+    }
+    assert.equal(readFileSync(`${f.root}/project/.git/config`, 'utf8'), 'original config');
+    assert.equal(readFileSync(`${f.root}/project/.git/hooks/pre-commit`, 'utf8'), 'original hook');
+    assert(!existsSync(`${f.root}/project/.gitconfig`));
+  } finally { await f.cleanup(); }
+});
 integration('SRT confines read/write/edit/bash, child processes, secrets, and shared temporary files', async () => {
   const previousSecret = process.env.HIRAISHI_FIXTURE_SECRET; process.env.HIRAISHI_FIXTURE_SECRET = 'synthetic-only';
   const f = await fixture();
