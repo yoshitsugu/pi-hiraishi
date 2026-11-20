@@ -199,6 +199,23 @@ test('starting with the baseline keeps the restrictions the request asked for', 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('starting with the baseline keeps a replace field that stays inside the ceiling', () => {
+  const root = mkdtempSync('/tmp/hiraishi-baseline-partial-');
+  try {
+    for (const dir of ['docs', 'docs/sub', 'cache', 'cache/sub', 'outside']) mkdirSync(`${root}/${dir}`);
+    const baseline = validateConfig({ readOnly: [`${root}/docs`], readWrite: [`${root}/cache`] });
+    const readNarrowed = restrictGrants(baseline, parseGrants(JSON.stringify({ replace: { readOnly: [`${root}/docs/sub`], readWrite: [`${root}/outside`] } })));
+    assert.deepEqual(readNarrowed.readOnly, [`${root}/docs/sub`]);
+    assert.deepEqual(readNarrowed.readWrite, [`${root}/cache`]);
+    const writeNarrowed = restrictGrants(baseline, parseGrants(JSON.stringify({ replace: { readOnly: [`${root}/outside`], readWrite: [`${root}/cache/sub`] } })));
+    assert.deepEqual(writeNarrowed.readOnly, [`${root}/docs`]);
+    assert.deepEqual(writeNarrowed.readWrite, [`${root}/cache/sub`]);
+    const both = restrictGrants(baseline, parseGrants(JSON.stringify({ replace: { readOnly: [`${root}/docs/sub`], readWrite: [`${root}/cache/sub`] } })));
+    assert.deepEqual(both.readOnly, [`${root}/docs/sub`]);
+    assert.deepEqual(both.readWrite, [`${root}/cache/sub`]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a grant ceiling clamps the startup mode and must not contradict it', () => {
   const baseline = validateConfig({ networkMode: 'http-get', maxNetworkMode: 'http-all' });
   const capped = mergeGrants(baseline, parseGrants('{"maxNetworkMode":"off"}'));

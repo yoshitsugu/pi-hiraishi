@@ -240,7 +240,7 @@ Fields of the JSON:
 
 **Requests beyond the ceiling**
 - Interactive sessions ask the user: allow as requested, start with the baseline, or refuse.
-- "Start with the baseline" drops only what the request adds. Restrictions still apply: added `denyRead`, `noHostCommands`, `hostCommands` and `replace` narrowing, and a lowered ceiling.
+- "Start with the baseline" drops only what the request adds. Restrictions still apply: added `denyRead`, `noHostCommands`, `hostCommands` and `replace` narrowing, and a lowered ceiling. `replace` is judged field by field: a field whose paths all stay inside the ceiling still narrows the session, and a field with any path outside it keeps the configured grants.
 - Without an interactive UI, a refused or malformed request ends the process and prints the reason to stderr. Other startup failures leave the session running with tools unavailable.
 
 Grant paths are canonicalized when loaded and merged. Moving a symlink over an approved path makes the next sandbox start fail. The resolved permissions become the ceiling for `/hiraishi-network`, subagents and host commands.

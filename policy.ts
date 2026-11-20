@@ -192,6 +192,11 @@ export function parseGrants(json: string): Grants {
   return grants;
 }
 
+const outsideCeiling = (paths: string[] | undefined, roots: string[]) => {
+  const canonicalRoots = roots.map(canonicalPath);
+  return (paths ?? []).filter(path => !canonicalRoots.some(root => within(canonicalPath(path), root)));
+};
+
 // Grants may narrow the session ceiling, add directories, or (via replace) drop baseline directories.
 export function ceilingViolations(grants: Grants, ceiling: Ceiling): string[] {
   const violations: string[] = [];
@@ -201,11 +206,8 @@ export function ceilingViolations(grants: Grants, ceiling: Ceiling): string[] {
       violations.push(`${key} ${value} exceeds the session ceiling ${ceiling.networkMode}`);
   }
   for (const name of ['readOnly', 'readWrite'] as const) {
-    const roots = ceiling[name].map(canonicalPath);
-    for (const path of [...(grants[name] ?? []), ...(grants.replace?.[name] ?? [])]) {
-      if (!roots.some(root => within(canonicalPath(path), root)))
-        violations.push(`${name} ${path} is outside the session ceiling`);
-    }
+    for (const path of [...outsideCeiling(grants[name], ceiling[name]), ...outsideCeiling(grants.replace?.[name], ceiling[name])])
+      violations.push(`${name} ${path} is outside the session ceiling`);
   }
   return violations;
 }
@@ -267,12 +269,22 @@ export function mergeGrants(baseline: Config, grants: Grants): Config {
     ...(hostCommands ? { hostCommands } : {}),
   };
 }
+// A replace field is kept only when all of its paths stay inside the ceiling. Dropping a whole field keeps that
+// field's baseline grants and must not discard the narrowing another requested field asked for.
+function replaceWithinCeiling(replace: NonNullable<Grants['replace']>, ceiling: Ceiling): Grants['replace'] {
+  const kept: NonNullable<Grants['replace']> = {};
+  for (const name of ['readOnly', 'readWrite'] as const) {
+    const paths = replace[name];
+    if (paths !== undefined && outsideCeiling(paths, ceiling[name]).length === 0) kept[name] = paths;
+  }
+  return Object.keys(kept).length ? kept : undefined;
+}
 // "Start with baseline" keeps every restriction the request asked for while dropping its additions.
 export function restrictGrants(baseline: Config, grants: Grants): Config {
   const ceiling = ceilingOf(baseline);
   const requested = grants.maxNetworkMode ?? grants.networkMode;
   const lowered = requested && networkRank(requested) < networkRank(baseline.maxNetworkMode) ? requested : baseline.maxNetworkMode;
-  const replace = grants.replace && ceilingViolations({ replace: grants.replace }, ceiling).length === 0 ? grants.replace : undefined;
+  const replace = grants.replace && replaceWithinCeiling(grants.replace, ceiling);
   return mergeGrants({ ...baseline, maxNetworkMode: lowered }, {
     ...(replace ? { replace } : {}),
     ...(grants.denyRead ? { denyRead: grants.denyRead } : {}),
