@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, 'hiraishi-publish');
 const identity = ['-c', 'user.name=Hiraishi Test', '-c', 'user.email=hiraishi@example.com', '-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false'];
-const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', LANG: 'C' };
+const env: Record<string, string | undefined> = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', LANG: 'C' };
 delete env.HOME;
 delete env.XDG_STATE_HOME;
 const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
